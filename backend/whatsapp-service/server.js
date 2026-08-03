@@ -8,7 +8,15 @@ app.use(cors());
 app.use(express.json());
 
 const client = new Client({
-    authStrategy: new LocalAuth()
+    authStrategy: new LocalAuth(),
+    puppeteer: {
+        headless: true,
+        args: [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage"
+        ]
+    }
 });
 
 client.on("qr", (qr) => {
@@ -37,6 +45,8 @@ app.post("/send", async (req, res) => {
     }
 });
 
-app.listen(5001, () => {
-    console.log("🚀 Server running on port 5001");
+const PORT = process.env.PORT || 5001;
+
+app.listen(PORT, () => {
+    console.log(`🚀 Server running on port ${PORT}`);
 });
