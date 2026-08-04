@@ -60,49 +60,8 @@ CORS(
     expose_headers=["Set-Cookie"]
 )
 
-import requests
-import os
-
-WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN")
-WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
 
 
-def send_whatsapp(phone, message):
-    try:
-        url = f"https://graph.facebook.com/v23.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
-
-        headers = {
-            "Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}",
-            "Content-Type": "application/json"
-        }
-
-        payload = {
-            "messaging_product": "whatsapp",
-            "recipient_type": "individual",
-            "to": phone,
-            "type": "text",
-            "text": {
-                "body": message
-            }
-        }
-
-        response = requests.post(
-            url,
-            headers=headers,
-            json=payload,
-            timeout=20
-        )
-
-        print("========== WHATSAPP ==========")
-        print("Status:", response.status_code)
-        print("Response:", response.text)
-        print("==============================")
-
-        return response.status_code == 200
-
-    except Exception as e:
-        print("WhatsApp Error:", e)
-        return False
 
 
 # MongoDB Configuration
@@ -399,31 +358,49 @@ def validate_patient_data(data, is_update=False):
     return errors
 # ==================== WHATSAPP INTEGRATION ====================
 
-WHATSAPP_API_URL = os.getenv(
-    "WHATSAPP_API_URL",
-    "https://kuzhivelildentalcare-production.up.railway.app/send"  # Default local WhatsApp service
-)
+
+
+WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN")
+WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
+
 
 def send_whatsapp(phone, message):
-    """Send WhatsApp message via Node backend"""
     try:
-        print(f"📤 Attempting WhatsApp: {phone} via {WHATSAPP_API_URL}")
-        
+        url = f"https://graph.facebook.com/v23.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
+
+        headers = {
+            "Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}",
+            "Content-Type": "application/json"
+        }
+
+        payload = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": phone,
+            "type": "text",
+            "text": {
+                "body": message
+            }
+        }
+
         response = requests.post(
-            WHATSAPP_API_URL,
-            json={
-                "phone": phone,
-                "message": message
-            },
-            headers={
-                "Content-Type": "application/json"
-            },
-            timeout=10
+            url,
+            headers=headers,
+            json=payload,
+            timeout=20
         )
-        print("📤 WhatsApp Status:", response.status_code)
-        print("📤 WhatsApp Response:", response.text)
+
+        print("========== WHATSAPP ==========")
+        print("Status:", response.status_code)
+        print("Response:", response.text)
+        print("==============================")
+
+        return response.status_code == 200
+
     except Exception as e:
-        print("❌ WhatsApp send failed:", e)
+        print("WhatsApp Error:", e)
+        return False
+
 
 def send_whatsapp_async(phone, message):
     """Send WhatsApp message in a separate thread to avoid blocking the main request"""
