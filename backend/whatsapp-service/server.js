@@ -126,39 +126,33 @@ app.get("/qr", (req, res) => {
 });
 
 app.post("/send", async (req, res) => {
+    console.log("📨 Received /send request");
+    console.log("Request Body:", req.body);
 
     try {
-
         const { phone, message } = req.body;
-
-        if (!connected) {
-            return res.status(400).json({
-                success: false,
-                message: "WhatsApp is not connected"
-            });
-        }
 
         const chatId = `${phone}@c.us`;
 
+        console.log("📱 Sending message to:", chatId);
+
         await client.sendMessage(chatId, message);
+
+        console.log("✅ Message sent successfully!");
 
         res.json({
             success: true
         });
 
     } catch (err) {
-
-        console.error(err);
+        console.error("❌ Send Error:", err);
 
         res.status(500).json({
             success: false,
             error: err.message
         });
-
     }
-
 });
-
 const PORT = process.env.PORT || 5001;
 
 app.listen(PORT, () => {
