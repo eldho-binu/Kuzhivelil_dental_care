@@ -60,6 +60,51 @@ CORS(
     expose_headers=["Set-Cookie"]
 )
 
+import requests
+import os
+
+WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN")
+WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
+
+
+def send_whatsapp(phone, message):
+    try:
+        url = f"https://graph.facebook.com/v23.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
+
+        headers = {
+            "Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}",
+            "Content-Type": "application/json"
+        }
+
+        payload = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": phone,
+            "type": "text",
+            "text": {
+                "body": message
+            }
+        }
+
+        response = requests.post(
+            url,
+            headers=headers,
+            json=payload,
+            timeout=20
+        )
+
+        print("========== WHATSAPP ==========")
+        print("Status:", response.status_code)
+        print("Response:", response.text)
+        print("==============================")
+
+        return response.status_code == 200
+
+    except Exception as e:
+        print("WhatsApp Error:", e)
+        return False
+
+
 # MongoDB Configuration
 MONGO_URI = os.getenv('MONGO_URI')
 
@@ -886,7 +931,7 @@ def create_patient():
               f"Thank you for choosing us for your dental care needs.\n"
               f"We’re excited to continue keeping your smile healthy and bright✨...!"
           )
-          send_whatsapp_async(phone, msg)
+          send_whatsapp(phone, msg)
 
         return jsonify({
             'success': True,
@@ -1066,7 +1111,7 @@ def create_appointment():
                 f"— *This is an automated system-generated message*"
             )
 
-            send_whatsapp_async(phone, message)
+            send_whatsapp(phone, message)
 
         return jsonify({
             "success": True,
