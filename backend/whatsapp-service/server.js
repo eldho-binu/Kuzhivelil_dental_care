@@ -23,22 +23,23 @@ const client = new Client({
             "--disable-setuid-sandbox",
             "--disable-dev-shm-usage",
             "--disable-gpu",
+            "--disable-extensions",
             "--disable-background-networking",
             "--disable-background-timer-throttling",
             "--disable-renderer-backgrounding",
-            "--disable-extensions",
-            "--disable-sync"
+            "--window-size=1280,720"
         ]
     }
 });
 
 client.on("qr", async (qr) => {
     console.log("📱 QR Code Generated");
+    connected = false;
 
     try {
         latestQR = await QRCode.toDataURL(qr);
-    } catch (err) {
-        console.error(err);
+    } catch (e) {
+        console.error(e);
     }
 });
 
@@ -46,20 +47,28 @@ client.on("authenticated", () => {
     console.log("✅ WhatsApp Authenticated");
 });
 
+client.on("loading_screen", (percent, message) => {
+    console.log(`Loading ${percent}% - ${message}`);
+});
+
+client.on("change_state", (state) => {
+    console.log("State:", state);
+});
+
 client.on("ready", () => {
+    console.log("✅ WhatsApp is ready!");
     connected = true;
     latestQR = null;
-    console.log("✅ WhatsApp is ready!");
 });
 
 client.on("auth_failure", (msg) => {
     connected = false;
-    console.log("❌ Authentication Failed:", msg);
+    console.log("❌ Auth Failure:", msg);
 });
 
 client.on("disconnected", (reason) => {
     connected = false;
-    console.log("⚠ WhatsApp Disconnected:", reason);
+    console.log("⚠ Disconnected:", reason);
 });
 
 client.initialize();
@@ -69,92 +78,54 @@ app.get("/", (req, res) => {
 });
 
 app.get("/status", (req, res) => {
-    res.json({
-        connected
-    });
+    res.json({ connected });
 });
 
 app.get("/qr", (req, res) => {
-
     if (connected) {
-        return res.send(`
-        <html>
-            <body style="font-family:Arial;text-align:center;margin-top:100px;">
-                <h2>✅ WhatsApp Already Connected</h2>
-            </body>
-        </html>
-        `);
+        return res.send("<h2>✅ WhatsApp Already Connected</h2>");
     }
 
     if (!latestQR) {
         return res.send(`
         <html>
-            <head>
-                <meta http-equiv="refresh" content="3">
-            </head>
-            <body style="font-family:Arial;text-align:center;margin-top:100px;">
-                <h2>Waiting for QR Code...</h2>
-            </body>
+        <head><meta http-equiv="refresh" content="3"></head>
+        <body style="font-family:Arial;text-align:center;margin-top:100px">
+        <h2>Waiting for QR...</h2>
+        </body>
         </html>
         `);
     }
 
     res.send(`
     <html>
-        <head>
-            <meta http-equiv="refresh" content="5">
-        </head>
-
-        <body style="
-            display:flex;
-            justify-content:center;
-            align-items:center;
-            flex-direction:column;
-            font-family:Arial;
-            height:100vh;
-        ">
-
-            <h2>Scan WhatsApp QR</h2>
-
-            <img src="${latestQR}" width="320"/>
-
-            <p>
-                WhatsApp → Settings → Linked Devices → Link a Device
-            </p>
-
-        </body>
+    <head><meta http-equiv="refresh" content="5"></head>
+    <body style="display:flex;justify-content:center;align-items:center;flex-direction:column;height:100vh;font-family:Arial">
+        <h2>Scan QR</h2>
+        <img src="${latestQR}" width="320">
+    </body>
     </html>
     `);
 });
 
 app.post("/send", async (req, res) => {
 
-    console.log("📨 Received Request");
-
     try {
 
         if (!connected) {
             return res.status(400).json({
                 success: false,
-                error: "WhatsApp is not connected"
+                error: "WhatsApp not connected"
             });
         }
 
         const { phone, message } = req.body;
 
-        console.log("Phone:", phone);
+        console.log("Sending to", phone);
 
-        const chatId = `${phone}@c.us`;
-
-        console.log("Chat ID:", chatId);
-
-        // Small delay to allow browser to settle
-        await new Promise(resolve => setTimeout(resolve, 2000));
-
-        const result = await client.sendMessage(chatId, message);
+        await client.sendMessage(`${phone}@c.us`, message);
 
         console.log("✅ Message Sent");
-        console.log(result.id._serialized);
 
         res.json({
             success: true
@@ -162,7 +133,6 @@ app.post("/send", async (req, res) => {
 
     } catch (err) {
 
-        console.error("❌ SEND ERROR");
         console.error(err);
 
         res.status(500).json({
@@ -174,8 +144,8 @@ app.post("/send", async (req, res) => {
 
 });
 
-const PORT = process.env.PORT || 5001;
+const PORT = process.env.PORT || 8080;
 
 app.listen(PORT, () => {
-    console.log(`🚀 Server running on port ${PORT}`);
+    console.log("🚀 Server running on port", PORT);
 });
