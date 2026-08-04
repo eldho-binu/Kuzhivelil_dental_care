@@ -126,26 +126,36 @@ app.get("/qr", (req, res) => {
 });
 
 app.post("/send", async (req, res) => {
-    console.log("📨 Received /send request");
-    console.log("Request Body:", req.body);
-
     try {
         const { phone, message } = req.body;
 
-        const chatId = `${phone}@c.us`;
+        console.log("📨 Request:", req.body);
 
-        console.log("📱 Sending message to:", chatId);
+        const numberId = await client.getNumberId(phone);
+        console.log("Number ID:", numberId);
 
-        await client.sendMessage(chatId, message);
+        if (!numberId) {
+            return res.status(400).json({
+                success: false,
+                error: "Number is not registered on WhatsApp"
+            });
+        }
 
-        console.log("✅ Message sent successfully!");
+        const result = await client.sendMessage(
+            numberId._serialized,
+            message
+        );
+
+        console.log("✅ Message sent");
+        console.log(result);
 
         res.json({
             success: true
         });
 
     } catch (err) {
-        console.error("❌ Send Error:", err);
+        console.error("❌ Send Error:");
+        console.error(err);
 
         res.status(500).json({
             success: false,
