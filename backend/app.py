@@ -356,7 +356,7 @@ def validate_patient_data(data, is_update=False):
 
 WHATSAPP_API_URL = os.getenv(
     "WHATSAPP_API_URL",
-    "https://kuzhivelildentalcare-production.up.railway.app"  # Default local WhatsApp service
+    "https://kuzhivelildentalcare-production.up.railway.app/send"  # Default local WhatsApp service
 )
 
 def send_whatsapp(phone, message):
