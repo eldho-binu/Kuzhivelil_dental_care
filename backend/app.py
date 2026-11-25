@@ -8,6 +8,7 @@ from functools import wraps
 import jwt
 import bcrypt
 import secrets
+import hashlib
 import os
 import math
 import traceback
@@ -15,6 +16,14 @@ import re
 import urllib.parse
 import requests
 from services.whatsapp_service import whatsapp_service
+from services.reminder_scheduler import (
+    ReminderScheduler,
+    cancel_reminder,
+    format_date_readable,
+    format_time_12h,
+    process_due_reminders,
+    schedule_or_update_reminder,
+)
 try:
     import certifi
     ca = certifi.where()
@@ -127,26 +136,6 @@ patients_collection = db['patients'] if db is not None else None
 admins_collection = db['admins'] if db is not None else None
 
 # --- Helper Functions ---
-def format_time_12h(time_str):
-    """Convert 24h time string (HH:MM) to 12h format (HH:MM AM/PM)"""
-    try:
-        if not time_str:
-            return time_str
-        dt = datetime.strptime(time_str, "%H:%M")
-        return dt.strftime("%I:%M %p")
-    except Exception:
-        return time_str
-
-
-def format_date_readable(date_str):
-    """Convert YYYY-MM-DD date string to readable DD MMM YYYY format."""
-    try:
-        if not date_str:
-            return date_str
-        dt = datetime.strptime(str(date_str).strip(), "%Y-%m-%d")
-        return dt.strftime("%d %b %Y")
-    except Exception:
-        return str(date_str)
 
 # JWT Helper Functions
 def generate_token(admin_id, username):
@@ -268,7 +257,10 @@ def serialize_patient(patient):
     for field in ['regno', 'name', 'phone', 'age', 'created_at']:
         if field not in patient:
             patient[field] = None
-                
+
+    if 'whatsapp_opt_in' not in patient or patient['whatsapp_opt_in'] is None:
+        patient['whatsapp_opt_in'] = True
+
     return patient
 
 def serialize_admin(admin):
@@ -370,6 +362,9 @@ def validate_patient_data(data, is_update=False):
 # ==================== WHATSAPP INTEGRATION ====================
 
 whatsapp_service.set_db_getter(lambda: db)
+reminder_scheduler = ReminderScheduler(lambda: db, whatsapp_service)
+if db is not None:
+    reminder_scheduler.start()
 
 # Update the authentication functions
 
@@ -850,6 +845,7 @@ def create_patient():
             'address': data.get('address', '').strip(),
             'phone': data.get('phone', '').strip(),
             'age': int(data['age']),
+            'whatsapp_opt_in': bool(data.get('whatsapp_opt_in', True)),
             'created_at': datetime.now(),
             'updated_at': datetime.now()
         }
@@ -858,7 +854,7 @@ def create_patient():
         result = patients_collection.insert_one(patient_doc)
         patient_doc['_id'] = result.inserted_id
 
-        # Notify newly registered patient's WhatsApp number using Meta Cloud API template
+        # Feature 1: Notify fixed clinic/admin WhatsApp number on new patient registration
         try:
             whatsapp_service.send_new_patient_notification(
                 patient_name=patient_doc['name'],
@@ -926,6 +922,9 @@ def update_patient(regno):
             'address': data.get('address', '').strip(),
             'phone': data.get('phone', '').strip(),
             'age': int(data['age']),
+            'whatsapp_opt_in': bool(
+                data.get('whatsapp_opt_in', existing_patient.get('whatsapp_opt_in', True))
+            ),
             'updated_at': datetime.now()
         }
 
@@ -1024,6 +1023,7 @@ def create_appointment():
         regno = str(data.get("regno") or "").strip()
         date = str(data.get("date") or "").strip()
         time = str(data.get("time") or "").strip()
+        doctor_name = str(data.get("doctor_name") or "").strip()
 
         if not regno or not date or not time:
             return jsonify({
@@ -1069,20 +1069,38 @@ def create_appointment():
             "datetime": appt_datetime,
             "created_at": datetime.now()
         }
+        if doctor_name:
+            appointment_doc["doctor_name"] = doctor_name
 
         insert_result = db['appointments'].insert_one(appointment_doc)
+        appt_id_str = str(insert_result.inserted_id)
+        patient_name = patient.get("name") or patient.get("Name") or "N/A"
+        patient_phone = patient.get("phone") or patient.get("Phone") or ""
 
-        # Notify patient's WhatsApp number using Meta Cloud API template
+        # Feature 4: Persist 5-hour reminder job in MongoDB (Asia/Kolkata timezone)
         try:
-            patient_name = patient.get("name") or patient.get("Name") or "N/A"
-            patient_phone = patient.get("phone") or patient.get("Phone") or ""
+            schedule_or_update_reminder(
+                db,
+                appointment_id=appt_id_str,
+                regno=canonical_regno,
+                patient_name=patient_name,
+                patient_phone=patient_phone,
+                date_str=date,
+                time_str=time,
+                doctor_name=doctor_name or None,
+            )
+        except Exception as sched_err:
+            print(f"Reminder scheduling error: {sched_err}")
+
+        # Feature 2: Notify fixed clinic/admin WhatsApp number on new appointment booking
+        try:
             whatsapp_service.send_new_appointment_notification(
                 patient_name=patient_name,
                 regno=canonical_regno,
                 appointment_date=format_date_readable(date),
                 appointment_time=format_time_12h(time),
                 patient_phone=patient_phone,
-                appointment_id=str(insert_result.inserted_id),
+                appointment_id=appt_id_str,
                 dedupe_key=f"new_appointment:{canonical_regno.lower()}:{date}:{time}",
             )
         except Exception as notify_err:
@@ -1167,33 +1185,79 @@ def get_appointments():
 @app.route('/api/appointments/<id>', methods=['PUT'])
 @require_auth
 def update_appointment(id):
-    """Update an appointment (date and time)"""
+    """Update an appointment (date and time) and reschedule its 5-hour reminder"""
     try:
+        if not check_db_connection() or db is None:
+            return jsonify({'success': False, 'error': 'Database connection failed'}), 503
+
         if not ObjectId.is_valid(id):
             return jsonify({'success': False, 'error': 'Invalid appointment ID'}), 400
-            
-        data = request.get_json()
-        date = data.get('date')
-        time = data.get('time')
-        
+
+        data = request.get_json() or {}
+        date = str(data.get('date') or '').strip()
+        time = str(data.get('time') or '').strip()
+        doctor_name = str(data.get('doctor_name') or '').strip()
+
         if not date or not time:
             return jsonify({'success': False, 'error': 'Date and time are required'}), 400
-            
-        # Update document
+
+        try:
+            appt_datetime = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M")
+        except ValueError:
+            return jsonify({
+                'success': False,
+                'error': 'Invalid date or time format. Expected YYYY-MM-DD and HH:MM'
+            }), 400
+
+        existing_appt = db['appointments'].find_one({'_id': ObjectId(id)})
+        if not existing_appt:
+            return jsonify({'success': False, 'error': 'Appointment not found'}), 404
+
         update_doc = {
             'date': date,
             'time': time,
-            'datetime': datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M"),
+            'datetime': appt_datetime,
             'updated_at': datetime.now()
         }
-        
-        result = db['appointments'].update_one(
+        if doctor_name:
+            update_doc['doctor_name'] = doctor_name
+
+        db['appointments'].update_one(
             {'_id': ObjectId(id)},
             {'$set': update_doc}
         )
-        
-        if result.matched_count == 0:
-            return jsonify({'success': False, 'error': 'Appointment not found'}), 404
+
+        # Feature 4: Update scheduled 5-hour reminder on reschedule
+        try:
+            old_date = str(existing_appt.get('date') or '').strip()
+            old_time = str(existing_appt.get('time') or '').strip()
+            if old_date and old_time:
+                whatsapp_service.invalidate_dedupe_key(
+                    f"appointment_reminder_5hrs:{id}:{old_date}:{old_time}"
+                )
+
+            regno = str(existing_appt.get('regno') or '').strip()
+            patient = find_patient_by_regno(regno)
+            patient_name = (
+                (patient.get('name') or patient.get('Name'))
+                if patient else 'Patient'
+            )
+            patient_phone = (
+                (patient.get('phone') or patient.get('Phone'))
+                if patient else ''
+            )
+            schedule_or_update_reminder(
+                db,
+                appointment_id=id,
+                regno=regno,
+                patient_name=patient_name or 'Patient',
+                patient_phone=patient_phone or '',
+                date_str=date,
+                time_str=time,
+                doctor_name=doctor_name or existing_appt.get('doctor_name'),
+            )
+        except Exception as sched_err:
+            print(f"Reschedule reminder update error: {sched_err}")
 
         return jsonify({
             'success': True,
@@ -1210,8 +1274,11 @@ def update_appointment(id):
 @app.route('/api/appointments/<id>', methods=['DELETE'])
 @require_auth
 def delete_appointment(id):
-    """Delete an appointment"""
+    """Cancel/delete an appointment, cancel pending reminder, and notify patient"""
     try:
+        if not check_db_connection() or db is None:
+            return jsonify({'success': False, 'error': 'Database connection failed'}), 503
+
         if not ObjectId.is_valid(id):
             return jsonify({'success': False, 'error': 'Invalid appointment ID'}), 400
 
@@ -1220,20 +1287,45 @@ def delete_appointment(id):
         if not deleted_appt:
             return jsonify({'success': False, 'error': 'Appointment not found'}), 404
 
+        regno = str(deleted_appt.get('regno') or '').strip()
+        date = str(deleted_appt.get('date') or '').strip()
+        time = str(deleted_appt.get('time') or '').strip()
+
+        # Feature 4 & 5: Cancel any pending 5-hour reminder immediately
         try:
-            regno = str(deleted_appt.get('regno') or '').strip().lower()
-            date = str(deleted_appt.get('date') or '').strip()
-            time = str(deleted_appt.get('time') or '').strip()
+            cancel_reminder(db, id)
+        except Exception as cancel_err:
+            print(f"Failed to cancel scheduled reminder: {cancel_err}")
+
+        try:
             if regno and date and time:
                 whatsapp_service.invalidate_dedupe_key(
-                    f"new_appointment:{regno}:{date}:{time}"
+                    f"new_appointment:{regno.lower()}:{date}:{time}"
                 )
         except Exception as dedupe_err:
             print(f"Failed to clear appointment notification dedupe key: {dedupe_err}")
 
+        # Feature 5: Send cancellation notification to patient's phone number
+        try:
+            patient = find_patient_by_regno(regno)
+            if patient and patient.get('whatsapp_opt_in', True) is not False:
+                patient_name = patient.get('name') or patient.get('Name') or 'Patient'
+                patient_phone = patient.get('phone') or patient.get('Phone') or ''
+                whatsapp_service.send_appointment_cancelled_notification(
+                    patient_name=patient_name,
+                    regno=regno,
+                    patient_phone=patient_phone,
+                    appointment_date=format_date_readable(date),
+                    appointment_time=format_time_12h(time),
+                    appointment_id=id,
+                    dedupe_key=f"appointment_cancelled:{id}",
+                )
+        except Exception as notify_err:
+            print(f"Appointment cancellation WhatsApp notification error: {notify_err}")
+
         return jsonify({
             'success': True,
-            'message': 'Appointment deleted successfully'
+            'message': 'Appointment cancelled successfully'
         })
 
     except Exception as e:
@@ -1243,55 +1335,308 @@ def delete_appointment(id):
             'error': 'Failed to delete appointment'
         }), 500
 
-@app.route('/api/reminder', methods=['GET'])
-def send_reminders():
+
+# ==================== ANNOUNCEMENTS, REMINDERS & WEBHOOK ====================
+
+@app.route('/api/announcements', methods=['GET'])
+@require_auth
+def get_announcements():
+    """Get clinic announcement broadcast history and opted-in patient count"""
     try:
-        reminder_template = (os.getenv("WHATSAPP_TEMPLATE_REMINDER") or "").strip()
-        if not reminder_template:
+        if not check_db_connection() or db is None or patients_collection is None:
+            return jsonify({'success': False, 'error': 'Database connection failed'}), 503
+
+        broadcasts = list(
+            db['clinic_announcements'].find().sort([('created_at', -1)]).limit(25)
+        )
+        for item in broadcasts:
+            item['_id'] = str(item['_id'])
+            if isinstance(item.get('created_at'), datetime):
+                item['created_at'] = item['created_at'].isoformat()
+
+        opted_in_count = patients_collection.count_documents({
+            'whatsapp_opt_in': {'$ne': False},
+            'phone': {'$regex': r'\d{10,}'}
+        })
+
+        return jsonify({
+            'success': True,
+            'data': broadcasts,
+            'opted_in_count': opted_in_count
+        })
+    except Exception as e:
+        print(f"Get announcements error: {e}")
+        return jsonify({'success': False, 'error': 'Failed to fetch announcements'}), 500
+
+
+@app.route('/api/announcements', methods=['POST'])
+@require_auth
+def create_announcement():
+    """Feature 3: Send clinic announcement template to all or selected opted-in patients"""
+    try:
+        if not check_db_connection() or db is None or patients_collection is None:
+            return jsonify({'success': False, 'error': 'Database connection failed'}), 503
+
+        data = request.get_json()
+        if not data:
+            return jsonify({'success': False, 'error': 'No data provided'}), 400
+
+        title = str(data.get('title') or 'Clinic Announcement').strip()
+        closure_date = str(data.get('closure_date') or '').strip()
+        reason = str(data.get('reason') or data.get('message') or '').strip()
+        reopening_date = str(data.get('reopening_date') or '').strip() or 'Will be updated'
+        target_mode = str(data.get('target_mode') or 'all_opted_in').strip()
+        selected_regnos = [
+            str(r).strip() for r in (data.get('regnos') or []) if str(r).strip()
+        ]
+        request_id = str(data.get('request_id') or '').strip()
+
+        if not closure_date or not reason:
             return jsonify({
-                "success": True,
-                "sent": 0,
-                "message": "Reminder template not configured"
+                'success': False,
+                'error': 'Closure/effective date and announcement reason are required'
+            }), 400
+
+        if target_mode not in {'all_opted_in', 'selected'}:
+            return jsonify({
+                'success': False,
+                'error': 'Invalid target_mode; expected all_opted_in or selected'
+            }), 400
+
+        if target_mode == 'selected' and not selected_regnos:
+            return jsonify({
+                'success': False,
+                'error': 'Please select at least one opted-in patient'
+            }), 400
+
+        # Prevent accidental duplicate broadcasts
+        hash_payload = '|'.join([
+            closure_date.lower(),
+            reason.lower(),
+            reopening_date.lower(),
+            target_mode,
+            ','.join(sorted(r.lower() for r in selected_regnos)),
+        ])
+        dedupe_hash = hashlib.sha256(hash_payload.encode('utf-8')).hexdigest()
+
+        recent_cutoff = datetime.utcnow() - timedelta(minutes=10)
+        dup_query = {'$or': [{'dedupe_hash': dedupe_hash, 'created_at': {'$gte': recent_cutoff}}]}
+        if request_id:
+            dup_query['$or'].append({'request_id': request_id})
+
+        if db['clinic_announcements'].find_one(dup_query):
+            return jsonify({
+                'success': False,
+                'error': 'Duplicate announcement broadcast prevented. This announcement was already sent recently.'
+            }), 409
+
+        patient_query = {'whatsapp_opt_in': {'$ne': False}}
+        if target_mode == 'selected':
+            patient_query['$or'] = [
+                {'regno': {'$in': selected_regnos}},
+                {'Reg No': {'$in': selected_regnos}},
+            ]
+
+        candidates = list(patients_collection.find(patient_query))
+        recipients = []
+        seen_regnos = set()
+        for p in candidates:
+            regno_val = str(p.get('regno') or p.get('Reg No') or '').strip()
+            phone_val = str(p.get('phone') or p.get('Phone') or '').strip()
+            if not regno_val or regno_val.lower() in seen_regnos:
+                continue
+            if not phone_val:
+                continue
+            seen_regnos.add(regno_val.lower())
+            recipients.append({
+                'regno': regno_val,
+                'name': str(p.get('name') or p.get('Name') or 'Patient').strip(),
+                'phone': phone_val,
             })
 
-        now = datetime.now()
-        future = now + timedelta(hours=6)
+        if not recipients:
+            return jsonify({
+                'success': False,
+                'error': 'No opted-in patients with a valid phone number matched the selection'
+            }), 400
 
-        appointments = db['appointments'].find({
-            "datetime": {"$gte": now, "$lte": future}
-        })
+        broadcast_id = str(ObjectId())
+        formatted_closure = format_date_readable(closure_date)
+        formatted_reopen = (
+            format_date_readable(reopening_date)
+            if re.fullmatch(r'\d{4}-\d{2}-\d{2}', reopening_date)
+            else reopening_date
+        )
 
-        count = 0
+        sent_count = 0
+        failed_count = 0
+        skipped_count = 0
+        delivery_results = []
 
-        for appt in appointments:
-            patient = find_patient_by_regno(appt["regno"])
+        for recipient in recipients:
+            res = whatsapp_service.send_clinic_announcement(
+                regno=recipient['regno'],
+                patient_phone=recipient['phone'],
+                closure_date=formatted_closure,
+                reason=reason,
+                reopening_date=formatted_reopen,
+                broadcast_id=broadcast_id,
+            )
+            status = res.get('status')
+            if res.get('success'):
+                sent_count += 1
+            elif res.get('skipped'):
+                skipped_count += 1
+            else:
+                failed_count += 1
 
-            if patient and patient.get("phone"):
-                result = whatsapp_service.send_template_message(
-                    to_phone=patient["phone"],
-                    template_name=reminder_template,
-                    parameters=[
-                        patient.get("name") or patient.get("Name") or "Patient",
-                        format_date_readable(appt.get("date")),
-                        format_time_12h(appt.get("time")),
-                    ],
-                    event_type="appointment_reminder",
-                    dedupe_key=f"reminder:{str(appt.get('_id'))}",
-                    entity_id=str(appt.get("_id")),
-                )
-                if result.get("success") and not result.get("duplicate"):
-                    count += 1
+            delivery_results.append({
+                'regno': recipient['regno'],
+                'name': recipient['name'],
+                'status': status,
+                'message_id': res.get('message_id'),
+                'error': res.get('error') or res.get('reason'),
+            })
+
+        broadcast_doc = {
+            'broadcast_id': broadcast_id,
+            'request_id': request_id or None,
+            'dedupe_hash': dedupe_hash,
+            'title': title,
+            'closure_date': formatted_closure,
+            'reason': reason,
+            'reopening_date': formatted_reopen,
+            'target_mode': target_mode,
+            'target_regnos': [r['regno'] for r in recipients],
+            'total_recipients': len(recipients),
+            'sent_count': sent_count,
+            'skipped_count': skipped_count,
+            'failed_count': failed_count,
+            'results': delivery_results,
+            'created_by': session.get('username') or 'admin',
+            'created_at': datetime.utcnow(),
+        }
+        db['clinic_announcements'].insert_one(broadcast_doc)
 
         return jsonify({
-            "success": True,
-            "sent": count
-        })
+            'success': True,
+            'message': f'Announcement processed for {len(recipients)} opted-in patient(s)',
+            'broadcast': {
+                'broadcast_id': broadcast_id,
+                'title': title,
+                'closure_date': formatted_closure,
+                'reason': reason,
+                'reopening_date': formatted_reopen,
+                'total_recipients': len(recipients),
+                'sent_count': sent_count,
+                'skipped_count': skipped_count,
+                'failed_count': failed_count,
+            }
+        }), 201
 
     except Exception as e:
-        print("Reminder error:", e)
+        print(f"Create announcement error: {e}")
         return jsonify({
-            "success": False
+            'success': False,
+            'error': 'Failed to send clinic announcement'
+        }), 500
+
+
+def _is_reminder_runner_authorized():
+    if is_authenticated():
+        return True
+    cron_secret = (os.getenv('WHATSAPP_CRON_SECRET') or '').strip()
+    if not cron_secret:
+        return True
+    provided = (
+        request.headers.get('X-Cron-Secret')
+        or request.args.get('secret')
+        or ''
+    ).strip()
+    return bool(provided and provided == cron_secret)
+
+
+@app.route('/api/reminder', methods=['GET'])
+@app.route('/api/reminders/run', methods=['GET', 'POST'])
+def send_reminders():
+    """Run due 5-hour appointment reminders (usable by cron worker or admin)"""
+    try:
+        if not _is_reminder_runner_authorized():
+            return jsonify({'success': False, 'error': 'Unauthorized'}), 401
+
+        if not check_db_connection() or db is None:
+            return jsonify({'success': False, 'error': 'Database connection failed'}), 503
+
+        summary = process_due_reminders(lambda: db, whatsapp_service)
+        return jsonify({
+            'success': True,
+            'sent': summary['sent'],
+            'summary': summary,
         })
+    except Exception as e:
+        print("Reminder error:", e)
+        return jsonify({'success': False, 'error': 'Failed to process reminders'}), 500
+
+
+@app.route('/api/reminders/status', methods=['GET'])
+@require_auth
+def get_reminder_status():
+    """Return recent scheduled reminder jobs and WhatsApp notification statuses"""
+    try:
+        if not check_db_connection() or db is None:
+            return jsonify({'success': False, 'error': 'Database connection failed'}), 503
+
+        reminders = list(
+            db['appointment_reminders'].find().sort([('remind_at', -1)]).limit(25)
+        )
+        for item in reminders:
+            item['_id'] = str(item['_id'])
+            for dt_field in ['appointment_at', 'remind_at', 'sent_at', 'cancelled_at', 'created_at', 'updated_at', 'next_retry_at']:
+                if isinstance(item.get(dt_field), datetime):
+                    item[dt_field] = item[dt_field].isoformat()
+
+        notifications = list(
+            db['whatsapp_notifications'].find().sort([('created_at', -1)]).limit(25)
+        )
+        for item in notifications:
+            item['_id'] = str(item['_id'])
+            for dt_field in ['created_at', 'sent_at', 'webhook_updated_at', 'invalidated_at']:
+                if isinstance(item.get(dt_field), datetime):
+                    item[dt_field] = item[dt_field].isoformat()
+
+        return jsonify({
+            'success': True,
+            'reminders': reminders,
+            'notifications': notifications,
+        })
+    except Exception as e:
+        print(f"Reminder status error: {e}")
+        return jsonify({'success': False, 'error': 'Failed to fetch reminder status'}), 500
+
+
+@app.route('/api/webhooks/whatsapp', methods=['GET', 'POST'])
+def whatsapp_webhook():
+    """Meta WhatsApp Cloud API webhook verification and delivery status tracking"""
+    if request.method == 'GET':
+        mode = request.args.get('hub.mode')
+        token = request.args.get('hub.verify_token')
+        challenge = request.args.get('hub.challenge', '')
+        if whatsapp_service.verify_webhook_token(mode, token):
+            return challenge, 200
+        return jsonify({'success': False, 'error': 'Invalid webhook verification token'}), 403
+
+    try:
+        raw_body = request.get_data() or b''
+        signature = request.headers.get('X-Hub-Signature-256')
+        if not whatsapp_service.verify_webhook_signature(raw_body, signature):
+            return jsonify({'success': False, 'error': 'Invalid webhook signature'}), 403
+
+        payload = request.get_json(silent=True) or {}
+        result = whatsapp_service.process_webhook_payload(payload)
+        return jsonify({'success': True, **result}), 200
+    except Exception as e:
+        print(f"WhatsApp webhook error: {e}")
+        return jsonify({'success': False, 'error': 'Webhook processing error'}), 500
 
 @app.route('/api/dashboard/stats', methods=['GET'])
 @require_auth

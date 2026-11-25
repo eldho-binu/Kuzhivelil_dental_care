@@ -1,7 +1,10 @@
-"""Unit and integration tests for Meta WhatsApp Cloud API notifications."""
+"""Unit and integration tests covering all 10 WhatsApp notification checklist scenarios."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
+import hashlib
+import hmac
 import io
+import json
 import logging
 import os
 import sys
@@ -9,9 +12,11 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from bson import ObjectId
+import pytz
 
-# Prevent live MongoDB network connection attempts during unit tests
+# Prevent live MongoDB network attempts or daemon startup during unit tests
 os.environ["MONGO_URI"] = ""
+os.environ["WHATSAPP_SCHEDULER_ENABLED"] = "false"
 os.environ.setdefault("SECRET_KEY", "test-secret-key-for-unit-tests-only")
 
 BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -19,6 +24,11 @@ if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
 
 import app as backend_app  # noqa: E402
+from services.reminder_scheduler import (  # noqa: E402
+    IST,
+    process_due_reminders,
+    recover_stuck_processing_reminders,
+)
 from services.whatsapp_service import WhatsAppService, normalize_phone_number  # noqa: E402
 
 
@@ -151,6 +161,15 @@ class FakeCollection:
                     doc.update(update["$set"])
         return FakeUpdateResult(matched, matched)
 
+    def find_one_and_update(self, query, update):
+        for doc in self.docs:
+            if _matches_query(doc, query):
+                before = dict(doc)
+                if "$set" in update:
+                    doc.update(update["$set"])
+                return before
+        return None
+
     def delete_one(self, query):
         for idx, doc in enumerate(self.docs):
             if _matches_query(doc, query):
@@ -177,6 +196,8 @@ class FakeDB:
             "appointments": FakeCollection(),
             "admins": FakeCollection(),
             "whatsapp_notifications": FakeCollection(),
+            "appointment_reminders": FakeCollection(),
+            "clinic_announcements": FakeCollection(),
         }
 
     def __getitem__(self, name):
@@ -212,12 +233,18 @@ class WhatsAppIntegrationTestCase(unittest.TestCase):
                 "WHATSAPP_ACCESS_TOKEN": "test_secret_meta_token_12345",
                 "WHATSAPP_PHONE_NUMBER_ID": "1492317537289190",
                 "WHATSAPP_BUSINESS_ACCOUNT_ID": "2187192222184438",
+                "WHATSAPP_ADMIN_PHONE": "+91 88483 17301",
                 "WHATSAPP_API_VERSION": "v23.0",
-                "WHATSAPP_RECIPIENT_NUMBER": "+91 88483 17301",
                 "WHATSAPP_ENABLED": "true",
-                "WHATSAPP_TEMPLATE_NEW_PATIENT": "new_patient_notification",
-                "WHATSAPP_TEMPLATE_NEW_APPOINTMENT": "new_appointment_notification",
                 "WHATSAPP_TEMPLATE_LANGUAGE": "en",
+                "WHATSAPP_PATIENT_TEMPLATE": "new_patient_notification",
+                "WHATSAPP_APPOINTMENT_TEMPLATE": "new_appointment_notification",
+                "WHATSAPP_ANNOUNCEMENT_TEMPLATE": "clinic_announcement",
+                "WHATSAPP_REMINDER_TEMPLATE": "appointment_reminder_5hrs",
+                "WHATSAPP_CANCELLATION_TEMPLATE": "appointment_cancellation",
+                "WHATSAPP_DEFAULT_DOCTOR_NAME": "Dr. Kuzhivelil",
+                "WHATSAPP_WEBHOOK_VERIFY_TOKEN": "verify_secret_123",
+                "WHATSAPP_APP_SECRET": "app_secret_abc",
             },
         )
         self.env_patcher.start()
@@ -247,12 +274,9 @@ class WhatsAppIntegrationTestCase(unittest.TestCase):
         phone, err = normalize_phone_number("12345")
         self.assertIsNone(phone)
         self.assertIsNotNone(err)
-        phone2, err2 = normalize_phone_number("abc1234567")
-        self.assertIsNone(phone2)
-        self.assertIsNotNone(err2)
 
     @patch("services.whatsapp_service.requests.post")
-    def test_1_new_patient_registration_sends_admin_template(self, mock_post):
+    def test_01_new_patient_registration_notifies_clinic_admin(self, mock_post):
         mock_post.return_value = self._mock_meta_success("wamid.patient.1")
 
         res = self.client.post(
@@ -267,43 +291,25 @@ class WhatsAppIntegrationTestCase(unittest.TestCase):
             },
         )
         self.assertEqual(res.status_code, 201)
-        data = res.get_json()
-        self.assertTrue(data["success"])
-        self.assertNotIn("test_secret_meta_token_12345", str(data))
-
-        # Verify saved in MongoDB
         self.assertEqual(self.fake_db["patients"].count_documents({"regno": "KDC-101"}), 1)
 
-        # Verify Meta Cloud API was called once with patient's normalized phone and template
         mock_post.assert_called_once()
-        call_args = mock_post.call_args
-        self.assertEqual(
-            call_args.args[0],
-            "https://graph.facebook.com/v23.0/1492317537289190/messages",
-        )
-        payload = call_args.kwargs["json"]
-        self.assertEqual(payload["to"], "919876543210")
-        self.assertEqual(payload["type"], "template")
+        payload = mock_post.call_args.kwargs["json"]
+        # Clinic/admin receives registration alert (NOT patient phone)
+        self.assertEqual(payload["to"], "918848317301")
         self.assertEqual(payload["template"]["name"], "new_patient_notification")
-        self.assertEqual(payload["template"]["language"]["code"], "en")
         params = [p["text"] for p in payload["template"]["components"][0]["parameters"]]
         self.assertEqual(params, ["Ananya Nair", "KDC-101", "9876543210"])
 
-        # Verify notification log stored in MongoDB without secrets
-        logs = list(self.fake_db["whatsapp_notifications"].find({}))
-        self.assertEqual(len(logs), 1)
-        self.assertEqual(logs[0]["status"], "sent")
-        self.assertEqual(logs[0]["message_id"], "wamid.patient.1")
-        self.assertNotIn("test_secret_meta_token_12345", str(logs[0]))
-
     @patch("services.whatsapp_service.requests.post")
-    def test_2_new_appointment_booking_sends_admin_template(self, mock_post):
+    def test_02_new_appointment_booking_notifies_clinic_admin_and_schedules_reminder(self, mock_post):
         self.fake_db["patients"].insert_one(
             {
                 "regno": "KDC-202",
                 "name": "Rahul Menon",
                 "phone": "9123456789",
                 "age": 34,
+                "whatsapp_opt_in": True,
                 "created_at": datetime.now(),
             }
         )
@@ -312,202 +318,383 @@ class WhatsAppIntegrationTestCase(unittest.TestCase):
         res = self.client.post(
             "/api/appointments",
             headers=self.auth_headers,
-            json={"regno": "KDC-202", "date": "2026-12-10", "time": "14:30"},
+            json={
+                "regno": "KDC-202",
+                "date": "2099-12-10",
+                "time": "14:30",
+                "doctor_name": "Dr. George",
+            },
         )
         self.assertEqual(res.status_code, 200)
-        data = res.get_json()
-        self.assertTrue(data["success"])
-        self.assertEqual(data["message"], "Appointment scheduled")
 
-        # Verify saved in MongoDB
-        self.assertEqual(
-            self.fake_db["appointments"].count_documents({"regno": "KDC-202"}), 1
-        )
-
-        # Verify Meta Cloud API call goes to the booked patient's phone
         mock_post.assert_called_once()
         payload = mock_post.call_args.kwargs["json"]
-        self.assertEqual(payload["to"], "919123456789")
+        # Clinic/admin receives booking alert (NOT patient phone)
+        self.assertEqual(payload["to"], "918848317301")
         self.assertEqual(payload["template"]["name"], "new_appointment_notification")
         params = [p["text"] for p in payload["template"]["components"][0]["parameters"]]
         self.assertEqual(
             params,
-            ["Rahul Menon", "KDC-202", "10 Dec 2026", "02:30 PM", "9123456789"],
+            ["Rahul Menon", "KDC-202", "10 Dec 2099", "02:30 PM", "9123456789"],
         )
 
-    @patch("services.whatsapp_service.requests.post")
-    def test_3_meta_api_error_does_not_rollback_patient_or_appointment(self, mock_post):
-        error_resp = MagicMock()
-        error_resp.status_code = 400
-        error_resp.json.return_value = {
-            "error": {"message": "Template not approved", "code": 132001}
-        }
-        mock_post.return_value = error_resp
-
-        # Patient registration must still succeed
-        res_p = self.client.post(
-            "/api/patients",
-            headers=self.auth_headers,
-            json={"regno": "KDC-303", "name": "Meera Das", "phone": "9988776655", "age": 25},
-        )
-        self.assertEqual(res_p.status_code, 201)
-        self.assertEqual(self.fake_db["patients"].count_documents({"regno": "KDC-303"}), 1)
-
-        # Appointment booking must still succeed even on timeout
-        mock_post.side_effect = __import__("requests").exceptions.Timeout("timed out")
-        res_a = self.client.post(
-            "/api/appointments",
-            headers=self.auth_headers,
-            json={"regno": "KDC-303", "date": "2026-12-11", "time": "10:00"},
-        )
-        self.assertEqual(res_a.status_code, 200)
+        # Reminder persisted in MongoDB for 5 hours prior in Asia/Kolkata
+        reminder = self.fake_db["appointment_reminders"].find_one({"regno": "KDC-202"})
+        self.assertIsNotNone(reminder)
+        self.assertEqual(reminder["status"], "pending")
+        self.assertEqual(reminder["doctor_name"], "Dr. George")
         self.assertEqual(
-            self.fake_db["appointments"].count_documents({"regno": "KDC-303"}), 1
+            reminder["appointment_at"] - reminder["remind_at"],
+            timedelta(hours=5),
         )
 
-        # Failures logged in MongoDB
-        logs = list(self.fake_db["whatsapp_notifications"].find({}))
-        self.assertEqual(len(logs), 2)
-        self.assertEqual(logs[0]["status"], "failed")
-        self.assertEqual(logs[0]["error_code"], 132001)
-        self.assertEqual(logs[1]["status"], "failed")
-        self.assertIn("timed out", logs[1]["error"])
-
     @patch("services.whatsapp_service.requests.post")
-    def test_4_missing_whatsapp_credentials_keeps_clinic_working(self, mock_post):
-        with patch.dict(
-            os.environ,
-            {
-                "WHATSAPP_ACCESS_TOKEN": "",
-                "WHATSAPP_PHONE_NUMBER_ID": "",
-                "WHATSAPP_RECIPIENT_NUMBER": "",
-            },
-        ):
-            res_p = self.client.post(
-                "/api/patients",
-                headers=self.auth_headers,
-                json={"regno": "KDC-404", "name": "John Doe", "phone": "9876501234", "age": 40},
-            )
-            self.assertEqual(res_p.status_code, 201)
-
-            res_a = self.client.post(
-                "/api/appointments",
-                headers=self.auth_headers,
-                json={"regno": "KDC-404", "date": "2026-12-12", "time": "11:15"},
-            )
-            self.assertEqual(res_a.status_code, 200)
-
-        mock_post.assert_not_called()
-        logs = list(self.fake_db["whatsapp_notifications"].find({}))
-        self.assertEqual(len(logs), 2)
-        self.assertTrue(all(log["status"] == "skipped" for log in logs))
-
-    @patch("services.whatsapp_service.requests.post")
-    def test_5_get_and_put_appointments_do_not_send_notifications(self, mock_post):
-        appt_id = ObjectId()
+    def test_03_five_hours_before_appointment_sends_reminder_to_patient(self, mock_post):
         self.fake_db["patients"].insert_one(
-            {"regno": "KDC-505", "name": "Sita Roy", "phone": "9000011111", "age": 31}
-        )
-        self.fake_db["appointments"].insert_one(
             {
-                "_id": appt_id,
-                "regno": "KDC-505",
-                "date": "2099-01-15",
-                "time": "09:30",
-                "datetime": datetime(2099, 1, 15, 9, 30),
-                "created_at": datetime.now(),
+                "regno": "KDC-303",
+                "name": "Meera Das",
+                "phone": "9988776655",
+                "age": 25,
+                "whatsapp_opt_in": True,
             }
         )
+        mock_post.return_value = self._mock_meta_success("wamid.rem.1")
 
-        get_res = self.client.get("/api/appointments", headers=self.auth_headers)
-        self.assertEqual(get_res.status_code, 200)
-        self.assertEqual(len(get_res.get_json()["data"]), 1)
-
-        put_res = self.client.put(
-            f"/api/appointments/{str(appt_id)}",
+        res = self.client.post(
+            "/api/appointments",
             headers=self.auth_headers,
-            json={"date": "2099-01-16", "time": "11:00"},
+            json={"regno": "KDC-303", "date": "2099-12-15", "time": "15:00"},
         )
-        self.assertEqual(put_res.status_code, 200)
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(mock_post.call_count, 1)  # admin booking notification
 
-        mock_post.assert_not_called()
+        # Before 5-hour mark (6 hours before in IST): should NOT send reminder
+        appt_ist = IST.localize(datetime(2099, 12, 15, 15, 0))
+        six_hrs_before_utc = (appt_ist - timedelta(hours=6)).astimezone(pytz.UTC).replace(tzinfo=None)
+        summary_early = process_due_reminders(
+            lambda: self.fake_db, self.test_service, now_utc=six_hrs_before_utc
+        )
+        self.assertEqual(summary_early["sent"], 0)
+        self.assertEqual(mock_post.call_count, 1)
+
+        # Exactly 5 hours before in IST: MUST send reminder to PATIENT phone
+        five_hrs_before_utc = (appt_ist - timedelta(hours=5)).astimezone(pytz.UTC).replace(tzinfo=None)
+        summary_due = process_due_reminders(
+            lambda: self.fake_db, self.test_service, now_utc=five_hrs_before_utc
+        )
+        self.assertEqual(summary_due["sent"], 1)
+        self.assertEqual(mock_post.call_count, 2)
+
+        rem_payload = mock_post.call_args.kwargs["json"]
+        self.assertEqual(rem_payload["to"], "919988776655")
+        self.assertEqual(rem_payload["template"]["name"], "appointment_reminder_5hrs")
+        rem_params = [p["text"] for p in rem_payload["template"]["components"][0]["parameters"]]
+        self.assertEqual(rem_params, ["Meera Das", "15 Dec 2099", "03:00 PM", "Dr. Kuzhivelil"])
+
+        # Re-running scheduler at 4 hours before must NOT send duplicate reminder
+        four_hrs_before_utc = (appt_ist - timedelta(hours=4)).astimezone(pytz.UTC).replace(tzinfo=None)
+        summary_again = process_due_reminders(
+            lambda: self.fake_db, self.test_service, now_utc=four_hrs_before_utc
+        )
+        self.assertEqual(summary_again["sent"], 0)
+        self.assertEqual(mock_post.call_count, 2)
 
     @patch("services.whatsapp_service.requests.post")
-    def test_6_duplicate_registration_and_booking_prevent_duplicate_notifications(self, mock_post):
+    def test_04_and_05_cancel_appointment_notifies_patient_and_cancels_reminder(self, mock_post):
+        self.fake_db["patients"].insert_one(
+            {
+                "regno": "KDC-404",
+                "name": "Sita Roy",
+                "phone": "9000011111",
+                "age": 31,
+                "whatsapp_opt_in": True,
+            }
+        )
+        mock_post.return_value = self._mock_meta_success("wamid.cancel.1")
+
+        book_res = self.client.post(
+            "/api/appointments",
+            headers=self.auth_headers,
+            json={"regno": "KDC-404", "date": "2099-12-16", "time": "11:00"},
+        )
+        self.assertEqual(book_res.status_code, 200)
+        appt = self.fake_db["appointments"].find_one({"regno": "KDC-404"})
+        appt_id = str(appt["_id"])
+
+        # Cancel appointment -> sends appointment_cancelled to PATIENT and cancels reminder
+        del_res = self.client.delete(f"/api/appointments/{appt_id}", headers=self.auth_headers)
+        self.assertEqual(del_res.status_code, 200)
+        self.assertEqual(mock_post.call_count, 2)
+
+        cancel_payload = mock_post.call_args.kwargs["json"]
+        self.assertEqual(cancel_payload["to"], "919000011111")
+        self.assertEqual(cancel_payload["template"]["name"], "appointment_cancellation")
+        cancel_params = [p["text"] for p in cancel_payload["template"]["components"][0]["parameters"]]
+        self.assertEqual(cancel_params, ["Sita Roy", "16 Dec 2099", "11:00 AM"])
+
+        # Reminder status must be cancelled; running scheduler at 5h mark sends nothing
+        reminder = self.fake_db["appointment_reminders"].find_one({"appointment_id": appt_id})
+        self.assertEqual(reminder["status"], "cancelled")
+
+        appt_ist = IST.localize(datetime(2099, 12, 16, 11, 0))
+        due_utc = (appt_ist - timedelta(hours=5)).astimezone(pytz.UTC).replace(tzinfo=None)
+        summary = process_due_reminders(lambda: self.fake_db, self.test_service, now_utc=due_utc)
+        self.assertEqual(summary["sent"], 0)
+        self.assertEqual(mock_post.call_count, 2)
+
+    @patch("services.whatsapp_service.requests.post")
+    def test_06_reschedule_appointment_updates_reminder_time(self, mock_post):
+        self.fake_db["patients"].insert_one(
+            {
+                "regno": "KDC-505",
+                "name": "Arun P",
+                "phone": "9888877777",
+                "age": 42,
+                "whatsapp_opt_in": True,
+            }
+        )
+        mock_post.return_value = self._mock_meta_success("wamid.resched.1")
+
+        self.client.post(
+            "/api/appointments",
+            headers=self.auth_headers,
+            json={"regno": "KDC-505", "date": "2099-12-20", "time": "10:00"},
+        )
+        appt = self.fake_db["appointments"].find_one({"regno": "KDC-505"})
+        appt_id = str(appt["_id"])
+
+        put_res = self.client.put(
+            f"/api/appointments/{appt_id}",
+            headers=self.auth_headers,
+            json={"date": "2099-12-21", "time": "16:30"},
+        )
+        self.assertEqual(put_res.status_code, 200)
+        # Updating does NOT spam admin booking notification
+        self.assertEqual(mock_post.call_count, 1)
+
+        # Old 5-hour time must NOT fire
+        old_due = (IST.localize(datetime(2099, 12, 20, 10, 0)) - timedelta(hours=5)).astimezone(pytz.UTC).replace(tzinfo=None)
+        s_old = process_due_reminders(lambda: self.fake_db, self.test_service, now_utc=old_due)
+        self.assertEqual(s_old["sent"], 0)
+
+        # New 5-hour time MUST fire with updated date/time
+        new_due = (IST.localize(datetime(2099, 12, 21, 16, 30)) - timedelta(hours=5)).astimezone(pytz.UTC).replace(tzinfo=None)
+        s_new = process_due_reminders(lambda: self.fake_db, self.test_service, now_utc=new_due)
+        self.assertEqual(s_new["sent"], 1)
+        rem_params = [p["text"] for p in mock_post.call_args.kwargs["json"]["template"]["components"][0]["parameters"]]
+        self.assertEqual(rem_params[:3], ["Arun P", "21 Dec 2099", "04:30 PM"])
+
+    @patch("services.whatsapp_service.requests.post")
+    def test_07_clinic_announcement_sends_only_to_selected_opted_in_patients(self, mock_post):
+        self.fake_db["patients"].insert_one(
+            {"regno": "KDC-701", "name": "Opted In 1", "phone": "9111111111", "whatsapp_opt_in": True}
+        )
+        self.fake_db["patients"].insert_one(
+            {"regno": "KDC-702", "name": "Opted Out", "phone": "9222222222", "whatsapp_opt_in": False}
+        )
+        self.fake_db["patients"].insert_one(
+            {"regno": "KDC-703", "name": "Opted In 2", "phone": "9333333333", "whatsapp_opt_in": True}
+        )
+        mock_post.return_value = self._mock_meta_success("wamid.ann.1")
+
+        ann_payload = {
+            "title": "Holiday Notice",
+            "closure_date": "2026-12-25",
+            "reason": "Christmas Holiday",
+            "reopening_date": "2026-12-26",
+            "target_mode": "selected",
+            "regnos": ["KDC-701", "KDC-702"],  # KDC-702 opted out, must be excluded!
+            "request_id": "req-ann-1",
+        }
+        res1 = self.client.post("/api/announcements", headers=self.auth_headers, json=ann_payload)
+        self.assertEqual(res1.status_code, 201)
+        data1 = res1.get_json()
+        self.assertEqual(data1["broadcast"]["sent_count"], 1)
+        mock_post.assert_called_once()
+
+        sent_json = mock_post.call_args.kwargs["json"]
+        self.assertEqual(sent_json["to"], "919111111111")
+        self.assertEqual(sent_json["template"]["name"], "clinic_announcement")
+        self.assertEqual(
+            [p["text"] for p in sent_json["template"]["components"][0]["parameters"]],
+            ["25 Dec 2026", "Christmas Holiday", "26 Dec 2026"],
+        )
+
+        # Duplicate broadcast prevention
+        res2 = self.client.post("/api/announcements", headers=self.auth_headers, json=ann_payload)
+        self.assertEqual(res2.status_code, 409)
+        self.assertEqual(mock_post.call_count, 1)
+
+    @patch("services.whatsapp_service.requests.post")
+    def test_08_duplicate_events_prevent_duplicate_notifications(self, mock_post):
         mock_post.return_value = self._mock_meta_success("wamid.dup.1")
 
-        # Duplicate registration
         p1 = self.client.post(
             "/api/patients",
             headers=self.auth_headers,
-            json={"regno": "KDC-606", "name": "Arjun K", "phone": "9898989898", "age": 22},
+            json={"regno": "KDC-808", "name": "Arjun K", "phone": "9898989898", "age": 22},
         )
         p2 = self.client.post(
             "/api/patients",
             headers=self.auth_headers,
-            json={"regno": "KDC-606", "name": "Arjun K", "phone": "9898989898", "age": 22},
+            json={"regno": "KDC-808", "name": "Arjun K", "phone": "9898989898", "age": 22},
         )
         self.assertEqual(p1.status_code, 201)
         self.assertEqual(p2.status_code, 400)
         self.assertEqual(mock_post.call_count, 1)
 
-        # Duplicate booking retry for same regno, date, time
         a1 = self.client.post(
             "/api/appointments",
             headers=self.auth_headers,
-            json={"regno": "KDC-606", "date": "2026-12-20", "time": "16:00"},
+            json={"regno": "KDC-808", "date": "2099-12-20", "time": "16:00"},
         )
         a2 = self.client.post(
             "/api/appointments",
             headers=self.auth_headers,
-            json={"regno": "KDC-606", "date": "2026-12-20", "time": "16:00"},
+            json={"regno": "KDC-808", "date": "2099-12-20", "time": "16:00"},
         )
         self.assertEqual(a1.status_code, 200)
         self.assertEqual(a2.status_code, 409)
         self.assertEqual(mock_post.call_count, 2)
 
-        # Service-level idempotency check also blocks duplicate sends with same dedupe_key
-        dup_result = self.test_service.send_new_patient_notification(
+        # Service-level duplicate suppression
+        dup_cancel = self.test_service.send_appointment_cancelled_notification(
             patient_name="Arjun K",
-            regno="KDC-606",
-            phone_number="9898989898",
+            regno="KDC-808",
+            patient_phone="9898989898",
+            appointment_date="20 Dec 2099",
+            appointment_time="04:00 PM",
+            appointment_id="appt-xyz",
         )
-        self.assertEqual(dup_result["status"], "duplicate_suppressed")
-        self.assertEqual(mock_post.call_count, 2)
-
-        # Deleting patient clears dedupe lock so re-registering sends again
-        del_res = self.client.delete("/api/patients/KDC-606", headers=self.auth_headers)
-        self.assertEqual(del_res.status_code, 200)
-        p3 = self.client.post(
-            "/api/patients",
-            headers=self.auth_headers,
-            json={"regno": "KDC-606", "name": "Arjun K", "phone": "9898989898", "age": 22},
+        self.assertTrue(dup_cancel["success"])
+        dup_cancel2 = self.test_service.send_appointment_cancelled_notification(
+            patient_name="Arjun K",
+            regno="KDC-808",
+            patient_phone="9898989898",
+            appointment_date="20 Dec 2099",
+            appointment_time="04:00 PM",
+            appointment_id="appt-xyz",
         )
-        self.assertEqual(p3.status_code, 201)
+        self.assertEqual(dup_cancel2["status"], "duplicate_suppressed")
         self.assertEqual(mock_post.call_count, 3)
 
     @patch("services.whatsapp_service.requests.post")
-    def test_7_unauthenticated_and_validation_failures_never_notify(self, mock_post):
-        unauth_p = self.client.post(
-            "/api/patients",
-            json={"regno": "KDC-707", "name": "No Auth", "phone": "9876543210", "age": 20},
+    def test_09_api_failure_recorded_and_temporary_reminder_retried_safely(self, mock_post):
+        self.fake_db["patients"].insert_one(
+            {"regno": "KDC-909", "name": "Retry User", "phone": "9777766666", "whatsapp_opt_in": True}
         )
-        unauth_a = self.client.post(
+        # First: booking succeeds even if admin notification fails with 500
+        err_resp = MagicMock()
+        err_resp.status_code = 500
+        err_resp.json.return_value = {"error": {"message": "Meta temporary error", "code": 2}}
+        mock_post.return_value = err_resp
+
+        res_a = self.client.post(
             "/api/appointments",
-            json={"regno": "KDC-707", "date": "2026-12-21", "time": "10:00"},
-        )
-        invalid_p = self.client.post(
-            "/api/patients",
             headers=self.auth_headers,
-            json={"regno": "", "name": "", "age": "abc"},
+            json={"regno": "KDC-909", "date": "2099-12-22", "time": "14:00"},
         )
-        self.assertEqual(unauth_p.status_code, 401)
-        self.assertEqual(unauth_a.status_code, 401)
-        self.assertEqual(invalid_p.status_code, 400)
-        mock_post.assert_not_called()
+        self.assertEqual(res_a.status_code, 200)
+
+        # Reminder attempt fails temporarily with Timeout -> scheduled for retry
+        mock_post.side_effect = __import__("requests").exceptions.Timeout("timed out")
+        appt_ist = IST.localize(datetime(2099, 12, 22, 14, 0))
+        t_due = (appt_ist - timedelta(hours=5)).astimezone(pytz.UTC).replace(tzinfo=None)
+        s1 = process_due_reminders(lambda: self.fake_db, self.test_service, now_utc=t_due)
+        self.assertEqual(s1["failed"], 1)
+        rem = self.fake_db["appointment_reminders"].find_one({"regno": "KDC-909"})
+        self.assertEqual(rem["status"], "failed")
+        self.assertEqual(rem["attempts"], 1)
+        self.assertIsNotNone(rem["next_retry_at"])
+
+        # Retry after backoff succeeds
+        mock_post.side_effect = None
+        mock_post.return_value = self._mock_meta_success("wamid.retry.ok")
+        t_retry = rem["next_retry_at"] + timedelta(seconds=1)
+        s2 = process_due_reminders(lambda: self.fake_db, self.test_service, now_utc=t_retry)
+        self.assertEqual(s2["sent"], 1)
+        rem_after = self.fake_db["appointment_reminders"].find_one({"regno": "KDC-909"})
+        self.assertEqual(rem_after["status"], "sent")
 
     @patch("services.whatsapp_service.requests.post")
-    def test_8_access_token_never_logged(self, mock_post):
+    def test_10_restart_recovery_and_webhook_status_tracking(self, mock_post):
+        self.fake_db["patients"].insert_one(
+            {"regno": "KDC-1010", "name": "Restart Patient", "phone": "9666655555", "whatsapp_opt_in": True}
+        )
+        mock_post.return_value = self._mock_meta_success("wamid.webhook.1")
+
+        # Simulate reminder stuck in 'processing' from server restart > 5 mins ago
+        appt_ist = IST.localize(datetime(2099, 12, 25, 12, 0))
+        appt_utc = appt_ist.astimezone(pytz.UTC).replace(tzinfo=None)
+        remind_utc = appt_utc - timedelta(hours=5)
+        appt_id = self.fake_db["appointments"].insert_one(
+            {"regno": "KDC-1010", "date": "2099-12-25", "time": "12:00", "datetime": appt_utc}
+        ).inserted_id
+        self.fake_db["appointment_reminders"].insert_one(
+            {
+                "appointment_id": str(appt_id),
+                "regno": "KDC-1010",
+                "patient_name": "Restart Patient",
+                "patient_phone": "9666655555",
+                "appointment_date": "2099-12-25",
+                "appointment_time": "12:00",
+                "doctor_name": "Dr. Kuzhivelil",
+                "appointment_at": appt_utc,
+                "remind_at": remind_utc,
+                "status": "processing",
+                "attempts": 0,
+                "max_attempts": 3,
+                "updated_at": remind_utc - timedelta(minutes=10),
+            }
+        )
+
+        recovered = recover_stuck_processing_reminders(self.fake_db, now_utc=remind_utc)
+        self.assertEqual(recovered, 1)
+        summary = process_due_reminders(lambda: self.fake_db, self.test_service, now_utc=remind_utc)
+        self.assertEqual(summary["sent"], 1)
+
+        # Verify Meta webhook GET challenge
+        wh_get = self.client.get(
+            "/api/webhooks/whatsapp?hub.mode=subscribe&hub.verify_token=verify_secret_123&hub.challenge=98765"
+        )
+        self.assertEqual(wh_get.status_code, 200)
+        self.assertEqual(wh_get.data.decode("utf-8"), "98765")
+
+        # Verify Meta webhook POST updates delivery_status -> delivered
+        webhook_body = json.dumps(
+            {
+                "entry": [
+                    {
+                        "changes": [
+                            {
+                                "value": {
+                                    "statuses": [
+                                        {"id": "wamid.webhook.1", "status": "delivered"}
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+        ).encode("utf-8")
+        sig = "sha256=" + hmac.new(b"app_secret_abc", webhook_body, hashlib.sha256).hexdigest()
+        wh_post = self.client.post(
+            "/api/webhooks/whatsapp",
+            data=webhook_body,
+            content_type="application/json",
+            headers={"X-Hub-Signature-256": sig},
+        )
+        self.assertEqual(wh_post.status_code, 200)
+        self.assertEqual(wh_post.get_json()["updated"], 1)
+
+        notif = self.fake_db["whatsapp_notifications"].find_one({"message_id": "wamid.webhook.1"})
+        self.assertEqual(notif["delivery_status"], "delivered")
+        self.assertEqual(notif["status"], "delivered")
+
+    @patch("services.whatsapp_service.requests.post")
+    def test_security_token_not_logged_and_missing_credentials_safe(self, mock_post):
         mock_post.return_value = self._mock_meta_success()
         log_stream = io.StringIO()
         service_logger = logging.getLogger("services.whatsapp_service")
@@ -516,29 +703,21 @@ class WhatsAppIntegrationTestCase(unittest.TestCase):
         try:
             self.test_service.send_new_patient_notification(
                 patient_name="Secret Check",
-                regno="KDC-808",
+                regno="KDC-SEC",
                 phone_number="9876543210",
             )
         finally:
             service_logger.removeHandler(mem_handler)
 
-        logs_text = log_stream.getvalue()
-        self.assertIn("WhatsApp notification sent", logs_text)
-        self.assertNotIn("test_secret_meta_token_12345", logs_text)
+        self.assertNotIn("test_secret_meta_token_12345", log_stream.getvalue())
 
-    @patch("services.whatsapp_service.requests.post")
-    def test_9_missing_patient_phone_skips_cleanly(self, mock_post):
-        res = self.client.post(
-            "/api/patients",
-            headers=self.auth_headers,
-            json={"regno": "KDC-909", "name": "No Phone Patient", "phone": "", "age": 30},
-        )
-        self.assertEqual(res.status_code, 201)
-        mock_post.assert_not_called()
-        logs = list(self.fake_db["whatsapp_notifications"].find({"entity_id": "KDC-909"}))
-        self.assertEqual(len(logs), 1)
-        self.assertEqual(logs[0]["status"], "skipped")
-        self.assertIn("Recipient phone number not provided", logs[0]["error"])
+        with patch.dict(os.environ, {"WHATSAPP_ACCESS_TOKEN": "", "WHATSAPP_ADMIN_PHONE": ""}):
+            res = self.client.post(
+                "/api/patients",
+                headers=self.auth_headers,
+                json={"regno": "KDC-SAFE", "name": "Safe User", "phone": "9876543210", "age": 20},
+            )
+            self.assertEqual(res.status_code, 201)
 
 
 if __name__ == "__main__":

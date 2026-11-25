@@ -1,6 +1,8 @@
-"""Official Meta WhatsApp Cloud API notification service."""
+"""Official Meta WhatsApp Cloud API notification service for Kuzhivelil Dental Care."""
 
 from datetime import datetime
+import hashlib
+import hmac
 import logging
 import os
 import re
@@ -23,10 +25,16 @@ if not logger.handlers:
 DEFAULT_API_VERSION = "v23.0"
 DEFAULT_TIMEOUT_SECONDS = 15
 DEFAULT_LANGUAGE_CODE = "en"
-DEFAULT_NEW_PATIENT_TEMPLATE = "new_patient_notification"
-DEFAULT_NEW_APPOINTMENT_TEMPLATE = "new_appointment_notification"
+DEFAULT_PATIENT_TEMPLATE = "new_patient_notification"
+DEFAULT_APPOINTMENT_TEMPLATE = "new_appointment_notification"
+DEFAULT_ANNOUNCEMENT_TEMPLATE = "clinic_announcement"
+DEFAULT_REMINDER_TEMPLATE = "appointment_reminder_5hrs"
+DEFAULT_CANCELLATION_TEMPLATE = "appointment_cancellation"
+DEFAULT_DOCTOR_NAME = "Dr. Kuzhivelil"
 DEFAULT_COUNTRY_CODE = "91"
 NOTIFICATIONS_COLLECTION = "whatsapp_notifications"
+
+RETRYABLE_META_ERROR_CODES = {1, 2, 4, 17, 130429, 131016, 131048}
 
 
 def _parse_bool(value: Optional[str], default: bool = True) -> bool:
@@ -74,7 +82,6 @@ def normalize_phone_number(
         return None, "Recipient phone number is empty"
 
     raw_str = str(raw_phone).strip()
-    # Reject letters or unexpected symbols before stripping formatting characters.
     if not re.fullmatch(r"[\d\s+\-().]+", raw_str):
         return None, "Recipient phone number contains invalid characters"
 
@@ -116,26 +123,62 @@ class WhatsAppService:
         except ValueError:
             timeout = DEFAULT_TIMEOUT_SECONDS
 
+        admin_phone = (
+            os.getenv("WHATSAPP_ADMIN_PHONE")
+            or os.getenv("WHATSAPP_RECIPIENT_NUMBER")
+            or ""
+        ).strip()
+
+        patient_tpl = (
+            os.getenv("WHATSAPP_PATIENT_TEMPLATE")
+            or os.getenv("WHATSAPP_TEMPLATE_NEW_PATIENT")
+            or DEFAULT_PATIENT_TEMPLATE
+        ).strip()
+
+        appointment_tpl = (
+            os.getenv("WHATSAPP_APPOINTMENT_TEMPLATE")
+            or os.getenv("WHATSAPP_TEMPLATE_NEW_APPOINTMENT")
+            or DEFAULT_APPOINTMENT_TEMPLATE
+        ).strip()
+
+        announcement_tpl = (
+            os.getenv("WHATSAPP_ANNOUNCEMENT_TEMPLATE")
+            or DEFAULT_ANNOUNCEMENT_TEMPLATE
+        ).strip()
+
+        reminder_tpl = (
+            os.getenv("WHATSAPP_REMINDER_TEMPLATE")
+            or DEFAULT_REMINDER_TEMPLATE
+        ).strip()
+
+        cancellation_tpl = (
+            os.getenv("WHATSAPP_CANCELLATION_TEMPLATE")
+            or DEFAULT_CANCELLATION_TEMPLATE
+        ).strip()
+
         return {
             "enabled": _parse_bool(os.getenv("WHATSAPP_ENABLED"), default=True),
             "access_token": (os.getenv("WHATSAPP_ACCESS_TOKEN") or "").strip(),
             "phone_number_id": (os.getenv("WHATSAPP_PHONE_NUMBER_ID") or "").strip(),
             "business_account_id": (os.getenv("WHATSAPP_BUSINESS_ACCOUNT_ID") or "").strip(),
             "api_version": _normalize_api_version(os.getenv("WHATSAPP_API_VERSION")),
-            "recipient_number": (os.getenv("WHATSAPP_RECIPIENT_NUMBER") or "").strip(),
-            "template_new_patient": (
-                os.getenv("WHATSAPP_TEMPLATE_NEW_PATIENT") or DEFAULT_NEW_PATIENT_TEMPLATE
-            ).strip(),
-            "template_new_appointment": (
-                os.getenv("WHATSAPP_TEMPLATE_NEW_APPOINTMENT")
-                or DEFAULT_NEW_APPOINTMENT_TEMPLATE
-            ).strip(),
+            "admin_phone": admin_phone,
+            "template_patient": patient_tpl,
+            "template_appointment": appointment_tpl,
+            "template_announcement": announcement_tpl,
+            "template_reminder": reminder_tpl,
+            "template_cancellation": cancellation_tpl,
             "template_language": (
                 os.getenv("WHATSAPP_TEMPLATE_LANGUAGE") or DEFAULT_LANGUAGE_CODE
+            ).strip(),
+            "default_doctor_name": (
+                os.getenv("WHATSAPP_DEFAULT_DOCTOR_NAME") or DEFAULT_DOCTOR_NAME
             ).strip(),
             "default_country_code": (
                 os.getenv("WHATSAPP_DEFAULT_COUNTRY_CODE") or DEFAULT_COUNTRY_CODE
             ).strip(),
+            "webhook_verify_token": (os.getenv("WHATSAPP_WEBHOOK_VERIFY_TOKEN") or "").strip(),
+            "app_secret": (os.getenv("WHATSAPP_APP_SECRET") or "").strip(),
             "timeout": timeout,
         }
 
@@ -165,7 +208,7 @@ class WhatsAppService:
                 existing = collection.find_one(
                     {
                         "dedupe_key": dedupe_key,
-                        "status": "sent",
+                        "status": {"$in": ["sent", "delivered", "read"]},
                         "active": {"$ne": False},
                     }
                 )
@@ -185,7 +228,7 @@ class WhatsAppService:
             self._sent_keys.add(dedupe_key)
 
     def invalidate_dedupe_key(self, dedupe_key: Optional[str]) -> None:
-        """Clear an active deduplication entry (e.g., when an appointment is deleted)."""
+        """Clear an active deduplication entry (e.g., when a record is deleted/rescheduled)."""
         if not dedupe_key:
             return
         with self._lock:
@@ -208,32 +251,47 @@ class WhatsAppService:
         template_name: str,
         language_code: str,
         recipient_masked: str,
+        recipient_phone: Optional[str],
+        parameters: Optional[List[str]],
         status: str,
         dedupe_key: Optional[str] = None,
+        regno: Optional[str] = None,
+        appointment_id: Optional[str] = None,
+        broadcast_id: Optional[str] = None,
         entity_id: Optional[str] = None,
         http_status: Optional[int] = None,
         message_id: Optional[str] = None,
         error: Optional[str] = None,
         error_code: Optional[Any] = None,
+        sent_at: Optional[datetime] = None,
     ) -> None:
         collection = self._get_notifications_collection()
         if collection is None:
             return
         try:
             doc = {
+                "regno": regno,
+                "appointment_id": appointment_id,
+                "broadcast_id": broadcast_id,
+                "recipient_phone": recipient_phone,
+                "recipient": recipient_masked,
+                "notification_type": event_type,
                 "event_type": event_type,
                 "template_name": template_name,
+                "parameters": parameters or [],
                 "language_code": language_code,
-                "recipient": recipient_masked,
-                "dedupe_key": dedupe_key,
-                "entity_id": entity_id,
-                "status": status,
-                "http_status": http_status,
                 "message_id": message_id,
+                "status": status,
+                "delivery_status": status if status in {"sent", "delivered", "read", "failed"} else None,
+                "http_status": http_status,
                 "error": error,
                 "error_code": error_code,
+                "dedupe_key": dedupe_key,
+                "entity_id": entity_id,
                 "active": True,
                 "created_at": datetime.utcnow(),
+                "sent_at": sent_at,
+                "webhook_updated_at": None,
             }
             collection.insert_one(doc)
         except Exception as exc:
@@ -248,11 +306,18 @@ class WhatsAppService:
         language_code: Optional[str] = None,
         event_type: str = "template",
         dedupe_key: Optional[str] = None,
+        regno: Optional[str] = None,
+        appointment_id: Optional[str] = None,
+        broadcast_id: Optional[str] = None,
         entity_id: Optional[str] = None,
+        missing_recipient_reason: str = "Recipient phone number not provided",
     ) -> Dict[str, Any]:
         """Send a Meta WhatsApp Cloud API approved template message."""
         config = self._get_config()
-        resolved_language = (language_code or config["template_language"] or DEFAULT_LANGUAGE_CODE).strip()
+        resolved_language = (
+            language_code or config["template_language"] or DEFAULT_LANGUAGE_CODE
+        ).strip()
+        sanitized_params = [_sanitize_template_param(p) for p in (parameters or [])]
         recipient_masked = _mask_phone(to_phone)
 
         if not config["enabled"]:
@@ -263,14 +328,20 @@ class WhatsAppService:
                 template_name=template_name,
                 language_code=resolved_language,
                 recipient_masked=recipient_masked,
+                recipient_phone=None,
+                parameters=sanitized_params,
                 status="skipped",
                 dedupe_key=dedupe_key,
+                regno=regno,
+                appointment_id=appointment_id,
+                broadcast_id=broadcast_id,
                 entity_id=entity_id,
                 error=reason,
             )
             return {
                 "success": False,
                 "skipped": True,
+                "retryable": False,
                 "status": "skipped",
                 "template_name": template_name,
                 "recipient": recipient_masked,
@@ -292,14 +363,20 @@ class WhatsAppService:
                 template_name=template_name,
                 language_code=resolved_language,
                 recipient_masked=recipient_masked,
+                recipient_phone=None,
+                parameters=sanitized_params,
                 status="skipped",
                 dedupe_key=dedupe_key,
+                regno=regno,
+                appointment_id=appointment_id,
+                broadcast_id=broadcast_id,
                 entity_id=entity_id,
                 error=reason,
             )
             return {
                 "success": False,
                 "skipped": True,
+                "retryable": False,
                 "status": "skipped",
                 "template_name": template_name,
                 "recipient": recipient_masked,
@@ -308,25 +385,34 @@ class WhatsAppService:
             }
 
         if not to_phone or not str(to_phone).strip() or str(to_phone).strip().upper() == "N/A":
-            reason = "Recipient phone number not provided"
-            logger.warning("Skipping WhatsApp notification (%s): %s", template_name, reason)
+            logger.warning(
+                "Skipping WhatsApp notification (%s): %s",
+                template_name,
+                missing_recipient_reason,
+            )
             self._record_notification_log(
                 event_type=event_type,
                 template_name=template_name,
                 language_code=resolved_language,
                 recipient_masked=recipient_masked,
+                recipient_phone=None,
+                parameters=sanitized_params,
                 status="skipped",
                 dedupe_key=dedupe_key,
+                regno=regno,
+                appointment_id=appointment_id,
+                broadcast_id=broadcast_id,
                 entity_id=entity_id,
-                error=reason,
+                error=missing_recipient_reason,
             )
             return {
                 "success": False,
                 "skipped": True,
+                "retryable": False,
                 "status": "skipped",
                 "template_name": template_name,
                 "recipient": recipient_masked,
-                "reason": reason,
+                "reason": missing_recipient_reason,
                 "error": None,
             }
 
@@ -344,14 +430,20 @@ class WhatsAppService:
                 template_name=template_name,
                 language_code=resolved_language,
                 recipient_masked=recipient_masked,
+                recipient_phone=None,
+                parameters=sanitized_params,
                 status="failed",
                 dedupe_key=dedupe_key,
+                regno=regno,
+                appointment_id=appointment_id,
+                broadcast_id=broadcast_id,
                 entity_id=entity_id,
                 error=phone_error,
             )
             return {
                 "success": False,
                 "skipped": False,
+                "retryable": False,
                 "status": "failed",
                 "template_name": template_name,
                 "recipient": recipient_masked,
@@ -370,6 +462,7 @@ class WhatsAppService:
                 "success": True,
                 "skipped": True,
                 "duplicate": True,
+                "retryable": False,
                 "status": "duplicate_suppressed",
                 "template_name": template_name,
                 "recipient": recipient_masked,
@@ -390,13 +483,12 @@ class WhatsAppService:
             "name": template_name,
             "language": {"code": resolved_language},
         }
-        if parameters:
+        if sanitized_params:
             template_obj["components"] = [
                 {
                     "type": "body",
                     "parameters": [
-                        {"type": "text", "text": _sanitize_template_param(param)}
-                        for param in parameters
+                        {"type": "text", "text": param} for param in sanitized_params
                     ],
                 }
             ]
@@ -424,14 +516,20 @@ class WhatsAppService:
                 template_name=template_name,
                 language_code=resolved_language,
                 recipient_masked=recipient_masked,
+                recipient_phone=normalized_phone,
+                parameters=sanitized_params,
                 status="failed",
                 dedupe_key=dedupe_key,
+                regno=regno,
+                appointment_id=appointment_id,
+                broadcast_id=broadcast_id,
                 entity_id=entity_id,
                 error=error_msg,
             )
             return {
                 "success": False,
                 "skipped": False,
+                "retryable": True,
                 "status": "failed",
                 "template_name": template_name,
                 "recipient": recipient_masked,
@@ -445,14 +543,20 @@ class WhatsAppService:
                 template_name=template_name,
                 language_code=resolved_language,
                 recipient_masked=recipient_masked,
+                recipient_phone=normalized_phone,
+                parameters=sanitized_params,
                 status="failed",
                 dedupe_key=dedupe_key,
+                regno=regno,
+                appointment_id=appointment_id,
+                broadcast_id=broadcast_id,
                 entity_id=entity_id,
                 error=error_msg,
             )
             return {
                 "success": False,
                 "skipped": False,
+                "retryable": True,
                 "status": "failed",
                 "template_name": template_name,
                 "recipient": recipient_masked,
@@ -474,6 +578,7 @@ class WhatsAppService:
                 if messages and isinstance(messages[0], dict)
                 else None
             )
+            sent_ts = datetime.utcnow()
             self._mark_sent_in_memory(dedupe_key)
             logger.info(
                 "WhatsApp notification sent: event=%s template=%s to=%s status=%s message_id=%s",
@@ -488,15 +593,22 @@ class WhatsAppService:
                 template_name=template_name,
                 language_code=resolved_language,
                 recipient_masked=recipient_masked,
+                recipient_phone=normalized_phone,
+                parameters=sanitized_params,
                 status="sent",
                 dedupe_key=dedupe_key,
+                regno=regno,
+                appointment_id=appointment_id,
+                broadcast_id=broadcast_id,
                 entity_id=entity_id,
                 http_status=response.status_code,
                 message_id=message_id,
+                sent_at=sent_ts,
             )
             return {
                 "success": True,
                 "skipped": False,
+                "retryable": False,
                 "status": "sent",
                 "http_status": response.status_code,
                 "message_id": message_id,
@@ -508,6 +620,11 @@ class WhatsAppService:
         api_error = response_data.get("error") if isinstance(response_data.get("error"), dict) else {}
         error_code = api_error.get("code")
         error_msg = api_error.get("message") or f"Meta WhatsApp API returned HTTP {response.status_code}"
+        retryable = (
+            response.status_code >= 500
+            or response.status_code == 429
+            or error_code in RETRYABLE_META_ERROR_CODES
+        )
         logger.error(
             "WhatsApp notification failed: event=%s template=%s to=%s http_status=%s code=%s error=%s",
             event_type,
@@ -522,8 +639,13 @@ class WhatsAppService:
             template_name=template_name,
             language_code=resolved_language,
             recipient_masked=recipient_masked,
+            recipient_phone=normalized_phone,
+            parameters=sanitized_params,
             status="failed",
             dedupe_key=dedupe_key,
+            regno=regno,
+            appointment_id=appointment_id,
+            broadcast_id=broadcast_id,
             entity_id=entity_id,
             http_status=response.status_code,
             error=error_msg,
@@ -532,6 +654,7 @@ class WhatsAppService:
         return {
             "success": False,
             "skipped": False,
+            "retryable": retryable,
             "status": "failed",
             "http_status": response.status_code,
             "template_name": template_name,
@@ -540,22 +663,21 @@ class WhatsAppService:
             "error_code": error_code,
         }
 
+    # --- Feature 1: Clinic/Admin Notification on New Patient Registration ---
     def send_new_patient_notification(
         self,
         *,
         patient_name: str,
         regno: str,
         phone_number: Optional[str],
-        recipient_phone: Optional[str] = None,
         dedupe_key: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Notify the newly registered patient's WhatsApp number."""
+        """Notify the fixed clinic/admin WhatsApp number when a new patient registers."""
         config = self._get_config()
-        target_phone = recipient_phone if (recipient_phone and str(recipient_phone).strip()) else phone_number
         resolved_dedupe = dedupe_key or f"new_patient:{str(regno).strip().lower()}"
         return self.send_template_message(
-            to_phone=target_phone,
-            template_name=config["template_new_patient"],
+            to_phone=config["admin_phone"],
+            template_name=config["template_patient"],
             parameters=[
                 patient_name,
                 regno,
@@ -564,9 +686,12 @@ class WhatsAppService:
             language_code=config["template_language"],
             event_type="new_patient",
             dedupe_key=resolved_dedupe,
+            regno=str(regno).strip(),
             entity_id=str(regno).strip(),
+            missing_recipient_reason="Missing required WhatsApp configuration: WHATSAPP_ADMIN_PHONE",
         )
 
+    # --- Feature 2: Clinic/Admin Notification on New Appointment Booking ---
     def send_new_appointment_notification(
         self,
         *,
@@ -575,20 +700,18 @@ class WhatsAppService:
         appointment_date: str,
         appointment_time: str,
         patient_phone: Optional[str],
-        recipient_phone: Optional[str] = None,
         appointment_id: Optional[str] = None,
         dedupe_key: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Notify the patient's WhatsApp number when a new appointment is booked."""
+        """Notify the fixed clinic/admin WhatsApp number when an appointment is booked."""
         config = self._get_config()
-        target_phone = recipient_phone if (recipient_phone and str(recipient_phone).strip()) else patient_phone
         resolved_dedupe = (
             dedupe_key
             or f"new_appointment:{str(regno).strip().lower()}:{str(appointment_date).strip()}:{str(appointment_time).strip()}"
         )
         return self.send_template_message(
-            to_phone=target_phone,
-            template_name=config["template_new_appointment"],
+            to_phone=config["admin_phone"],
+            template_name=config["template_appointment"],
             parameters=[
                 patient_name,
                 regno,
@@ -599,8 +722,177 @@ class WhatsAppService:
             language_code=config["template_language"],
             event_type="new_appointment",
             dedupe_key=resolved_dedupe,
+            regno=str(regno).strip(),
+            appointment_id=appointment_id,
             entity_id=appointment_id or f"{str(regno).strip()}:{appointment_date}:{appointment_time}",
+            missing_recipient_reason="Missing required WhatsApp configuration: WHATSAPP_ADMIN_PHONE",
         )
+
+    # --- Feature 3: Patient Notification for General Clinic Announcements ---
+    def send_clinic_announcement(
+        self,
+        *,
+        regno: str,
+        patient_phone: Optional[str],
+        closure_date: str,
+        reason: str,
+        reopening_date: str,
+        broadcast_id: str,
+        dedupe_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Send a clinic announcement template to an opted-in patient's phone number."""
+        config = self._get_config()
+        resolved_dedupe = (
+            dedupe_key or f"clinic_announcement:{broadcast_id}:{str(regno).strip().lower()}"
+        )
+        return self.send_template_message(
+            to_phone=patient_phone,
+            template_name=config["template_announcement"],
+            parameters=[closure_date, reason, reopening_date],
+            language_code=config["template_language"],
+            event_type="clinic_announcement",
+            dedupe_key=resolved_dedupe,
+            regno=str(regno).strip(),
+            broadcast_id=broadcast_id,
+            entity_id=f"{broadcast_id}:{str(regno).strip()}",
+            missing_recipient_reason="Patient phone number not provided",
+        )
+
+    # --- Feature 4: Patient Notification for 5-Hour Appointment Reminder ---
+    def send_appointment_reminder(
+        self,
+        *,
+        patient_name: str,
+        regno: str,
+        patient_phone: Optional[str],
+        appointment_date: str,
+        appointment_time: str,
+        doctor_name: Optional[str] = None,
+        appointment_id: Optional[str] = None,
+        dedupe_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Send the 5-hour reminder template to the patient's registered WhatsApp number."""
+        config = self._get_config()
+        resolved_doctor = (
+            (doctor_name or "").strip() or config["default_doctor_name"] or DEFAULT_DOCTOR_NAME
+        )
+        resolved_dedupe = (
+            dedupe_key
+            or f"appointment_reminder_5hrs:{appointment_id or regno}:{appointment_date}:{appointment_time}"
+        )
+        return self.send_template_message(
+            to_phone=patient_phone,
+            template_name=config["template_reminder"],
+            parameters=[
+                patient_name,
+                appointment_date,
+                appointment_time,
+                resolved_doctor,
+            ],
+            language_code=config["template_language"],
+            event_type="appointment_reminder_5hrs",
+            dedupe_key=resolved_dedupe,
+            regno=str(regno).strip(),
+            appointment_id=appointment_id,
+            entity_id=appointment_id or f"{str(regno).strip()}:{appointment_date}:{appointment_time}",
+            missing_recipient_reason="Patient phone number not provided",
+        )
+
+    # --- Feature 5: Patient Notification on Appointment Cancellation ---
+    def send_appointment_cancelled_notification(
+        self,
+        *,
+        patient_name: str,
+        regno: str,
+        patient_phone: Optional[str],
+        appointment_date: str,
+        appointment_time: str,
+        appointment_id: Optional[str] = None,
+        dedupe_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Notify the patient's WhatsApp number immediately when an appointment is cancelled."""
+        config = self._get_config()
+        resolved_dedupe = (
+            dedupe_key
+            or f"appointment_cancelled:{appointment_id or f'{str(regno).strip().lower()}:{appointment_date}:{appointment_time}'}"
+        )
+        return self.send_template_message(
+            to_phone=patient_phone,
+            template_name=config["template_cancellation"],
+            parameters=[patient_name, appointment_date, appointment_time],
+            language_code=config["template_language"],
+            event_type="appointment_cancelled",
+            dedupe_key=resolved_dedupe,
+            regno=str(regno).strip(),
+            appointment_id=appointment_id,
+            entity_id=appointment_id or f"{str(regno).strip()}:{appointment_date}:{appointment_time}",
+            missing_recipient_reason="Patient phone number not provided",
+        )
+
+    # --- Webhook Verification & Delivery Status Tracking ---
+    def verify_webhook_token(self, mode: Optional[str], token: Optional[str]) -> bool:
+        config = self._get_config()
+        expected = config["webhook_verify_token"]
+        return bool(expected and mode == "subscribe" and token == expected)
+
+    def verify_webhook_signature(self, raw_body: bytes, signature_header: Optional[str]) -> bool:
+        config = self._get_config()
+        app_secret = config["app_secret"]
+        if not app_secret:
+            return True
+        if not signature_header or not signature_header.startswith("sha256="):
+            return False
+        expected_sig = hmac.new(
+            app_secret.encode("utf-8"),
+            raw_body,
+            hashlib.sha256,
+        ).hexdigest()
+        provided_sig = signature_header.split("=", 1)[1].strip()
+        return hmac.compare_digest(expected_sig, provided_sig)
+
+    def process_webhook_payload(self, payload: Dict[str, Any]) -> Dict[str, int]:
+        """Update WhatsApp delivery/read/failure status from Meta webhook callbacks."""
+        updated = 0
+        collection = self._get_notifications_collection()
+        if not isinstance(payload, dict) or collection is None:
+            return {"updated": 0}
+
+        for entry in payload.get("entry") or []:
+            for change in entry.get("changes") or []:
+                value = change.get("value") or {}
+                for status_event in value.get("statuses") or []:
+                    msg_id = status_event.get("id")
+                    delivery_status = status_event.get("status")
+                    if not msg_id or not delivery_status:
+                        continue
+
+                    update_fields: Dict[str, Any] = {
+                        "delivery_status": delivery_status,
+                        "webhook_updated_at": datetime.utcnow(),
+                    }
+                    if delivery_status in {"sent", "delivered", "read", "failed"}:
+                        update_fields["status"] = delivery_status
+
+                    errors = status_event.get("errors") or []
+                    if errors and isinstance(errors[0], dict):
+                        update_fields["error_code"] = errors[0].get("code")
+                        update_fields["error"] = (
+                            errors[0].get("title")
+                            or errors[0].get("message")
+                            or "Webhook reported delivery failure"
+                        )
+
+                    try:
+                        res = collection.update_one(
+                            {"message_id": msg_id},
+                            {"$set": update_fields},
+                        )
+                        if getattr(res, "matched_count", 0) > 0:
+                            updated += 1
+                    except Exception as exc:
+                        logger.warning("Webhook status update failed for %s: %s", msg_id, exc)
+
+        return {"updated": updated}
 
 
 whatsapp_service = WhatsAppService()

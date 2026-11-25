@@ -330,6 +330,19 @@ const api = {
     return await response.json();
   },
 
+  getAnnouncements: async () => {
+    const response = await api.makeAuthenticatedRequest(`${API_BASE}/announcements`);
+    return await response.json();
+  },
+
+  createAnnouncement: async (announcementData) => {
+    const response = await api.makeAuthenticatedRequest(`${API_BASE}/announcements`, {
+      method: 'POST',
+      body: JSON.stringify(announcementData)
+    });
+    return await response.json();
+  },
+
   exportPatients: async () => {
     try {
       const response = await api.makeAuthenticatedRequest(`${API_BASE}/patients?limit=10000`);

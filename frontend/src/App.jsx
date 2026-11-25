@@ -16,7 +16,9 @@ import {
   Eye,
   EyeOff,
   AlertCircle,
-  Download // Add Download icon
+  Download, // Add Download icon
+  Megaphone,
+  Send
 } from 'lucide-react';
 import clinicLogo from './assets/Logo.png';
 
@@ -353,6 +355,27 @@ const api = {
     return await response.json();
   },
 
+  updateAppointment: async (id, apptData) => {
+    const response = await api.makeAuthenticatedRequest(`${API_BASE}/appointments/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(apptData)
+    });
+    return await response.json();
+  },
+
+  getAnnouncements: async () => {
+    const response = await api.makeAuthenticatedRequest(`${API_BASE}/announcements`);
+    return await response.json();
+  },
+
+  createAnnouncement: async (announcementData) => {
+    const response = await api.makeAuthenticatedRequest(`${API_BASE}/announcements`, {
+      method: 'POST',
+      body: JSON.stringify(announcementData)
+    });
+    return await response.json();
+  },
+
   // Add CSV export method
   exportPatients: async () => {
     try {
@@ -596,7 +619,23 @@ function App() {
     // Modals / Selection
   
   const [apptPatient, setApptPatient] = useState(null); // NEW: For Appointment Modal
-  const [apptData, setApptData] = useState({ date: '', time: '' });
+  const [apptData, setApptData] = useState({ date: '', time: '', doctor_name: '' });
+  const [rescheduleAppt, setRescheduleAppt] = useState(null);
+  const [rescheduleData, setRescheduleData] = useState({ date: '', time: '' });
+
+  // Announcements state
+  const [announcements, setAnnouncements] = useState([]);
+  const [optedInCount, setOptedInCount] = useState(0);
+  const [optedInPatients, setOptedInPatients] = useState([]);
+  const [announcementSearch, setAnnouncementSearch] = useState('');
+  const [announcementForm, setAnnouncementForm] = useState({
+    title: 'Clinic Announcement',
+    closure_date: '',
+    reason: '',
+    reopening_date: '',
+    target_mode: 'all_opted_in',
+    regnos: []
+  });
 
   // Form state
   const [formData, setFormData] = useState({
@@ -604,7 +643,8 @@ function App() {
     name: '',
     address: '',
     phone: '',
-    age: ''
+    age: '',
+    whatsapp_opt_in: true
   });
 
   // Auth check on app load
@@ -808,13 +848,14 @@ function App() {
       const result = await api.createAppointment({
         regno: apptPatient.regno,
         date: apptData.date,
-        time: apptData.time
+        time: apptData.time,
+        ...(apptData.doctor_name ? { doctor_name: apptData.doctor_name } : {})
       });
 
       if (result.success) {
         showSuccess("Appointment booked successfully!");
         setApptPatient(null);
-        setApptData({ date: '', time: '' });
+        setApptData({ date: '', time: '', doctor_name: '' });
         if (currentView === 'appointments') loadAppointments();
         loadDashboardStats();
       } else {
@@ -912,7 +953,7 @@ function App() {
 
       if (result.success) {
         showSuccess('Patient registered successfully!');
-        setFormData({ regno: '', name: '', address: '', phone: '', age: '' });
+        setFormData({ regno: '', name: '', address: '', phone: '', age: '', whatsapp_opt_in: true });
         await loadPatients();
         await loadDashboardStats();
       } else {
@@ -932,7 +973,8 @@ function App() {
       name: patient.name,
       address: patient.address || '',
       phone: patient.phone || '',
-      age: patient.age
+      age: patient.age,
+      whatsapp_opt_in: patient.whatsapp_opt_in !== false
     });
     setCurrentView('edit');
   };
@@ -985,17 +1027,121 @@ function App() {
   };
 
   const handleDeleteAppointment = async (id) => {
-    if (!window.confirm('Are you sure you want to delete this appointment?')) return;
+    if (!window.confirm('Are you sure you want to cancel this appointment?')) return;
 
     try {
       setLoading(true);
       const result = await api.deleteAppointment(id);
       if (result.success) {
-        showSuccess('Appointment deleted successfully');
+        showSuccess('Appointment cancelled successfully');
         loadAppointments();
         loadDashboardStats();
       } else {
         setError(result.error);
+      }
+    } catch (err) {
+      handleApiError(err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleRescheduleAppt = async () => {
+    if (!rescheduleAppt || !rescheduleData.date || !rescheduleData.time) {
+      setError('Please select a new date and time');
+      return;
+    }
+
+    try {
+      setLoading(true);
+      const result = await api.updateAppointment(rescheduleAppt._id, {
+        date: rescheduleData.date,
+        time: rescheduleData.time
+      });
+      if (result.success) {
+        showSuccess('Appointment rescheduled successfully!');
+        setRescheduleAppt(null);
+        setRescheduleData({ date: '', time: '' });
+        loadAppointments();
+        loadDashboardStats();
+      } else {
+        setError(result.error || 'Failed to reschedule appointment');
+      }
+    } catch (err) {
+      handleApiError(err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const loadAnnouncements = async () => {
+    try {
+      setLoading(true);
+      const [annResult, patientsList] = await Promise.all([
+        api.getAnnouncements(),
+        api.exportPatients()
+      ]);
+      if (annResult && annResult.success) {
+        setAnnouncements(annResult.data || []);
+        setOptedInCount(annResult.opted_in_count || 0);
+      }
+      const eligible = (patientsList || []).filter(
+        (p) => p.whatsapp_opt_in !== false && p.phone && String(p.phone).trim()
+      );
+      setOptedInPatients(eligible);
+    } catch (err) {
+      handleApiError(err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleToggleAnnouncementPatient = (regno) => {
+    setAnnouncementForm((prev) => {
+      const exists = prev.regnos.includes(regno);
+      return {
+        ...prev,
+        regnos: exists
+          ? prev.regnos.filter((r) => r !== regno)
+          : [...prev.regnos, regno]
+      };
+    });
+  };
+
+  const handleSendAnnouncement = async (e) => {
+    e.preventDefault();
+    if (!announcementForm.closure_date || !announcementForm.reason.trim()) {
+      setError('Closure/effective date and announcement reason are required');
+      return;
+    }
+    if (announcementForm.target_mode === 'selected' && announcementForm.regnos.length === 0) {
+      setError('Please select at least one opted-in patient');
+      return;
+    }
+
+    try {
+      setLoading(true);
+      setError(null);
+      const result = await api.createAnnouncement({
+        ...announcementForm,
+        request_id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      });
+      if (result.success) {
+        const b = result.broadcast || {};
+        showSuccess(
+          `Announcement processed: ${b.sent_count || 0} sent, ${b.failed_count || 0} failed, ${b.skipped_count || 0} skipped.`
+        );
+        setAnnouncementForm({
+          title: 'Clinic Announcement',
+          closure_date: '',
+          reason: '',
+          reopening_date: '',
+          target_mode: 'all_opted_in',
+          regnos: []
+        });
+        await loadAnnouncements();
+      } else {
+        setError(result.error || 'Failed to send announcement');
       }
     } catch (err) {
       handleApiError(err);
@@ -1169,7 +1315,7 @@ function App() {
             <button
               onClick={() => {
                 setCurrentView('new');
-                setFormData({ regno: '', name: '', address: '', phone: '', age: '' });
+                setFormData({ regno: '', name: '', address: '', phone: '', age: '', whatsapp_opt_in: true });
                 setError(null);
                 setSidebarOpen(false);
               }}
@@ -1209,6 +1355,21 @@ function App() {
             >
               <Calendar className="w-5 h-5 mr-3 flex-shrink-0" />
               Appointments
+            </button>
+
+            <button
+              onClick={() => {
+                setCurrentView('announcements');
+                loadAnnouncements();
+                setSidebarOpen(false);
+              }}
+              className={`w-full flex items-center px-4 py-3 text-left rounded-lg text-sm transition-all ${currentView === 'announcements'
+                ? 'bg-cyan-50 text-cyan-700 font-bold border-l-4 border-cyan-600 shadow-xs'
+                : 'text-slate-600 hover:bg-slate-100/80 hover:text-slate-900 font-medium'
+                }`}
+            >
+              <Megaphone className="w-5 h-5 mr-3 flex-shrink-0" />
+              Announcements
             </button>
 
             {/* Export CSV button */}
@@ -1516,6 +1677,19 @@ function App() {
                     />
                   </div>
 
+                  <div className="flex items-center space-x-2">
+                    <input
+                      id="new-whatsapp-opt-in"
+                      type="checkbox"
+                      checked={formData.whatsapp_opt_in !== false}
+                      onChange={(e) => setFormData({ ...formData, whatsapp_opt_in: e.target.checked })}
+                      className="h-4 w-4 text-cyan-600 border-slate-300 rounded focus:ring-cyan-500"
+                    />
+                    <label htmlFor="new-whatsapp-opt-in" className="text-sm text-slate-700">
+                      Patient opted in for WhatsApp reminders & clinic announcements
+                    </label>
+                  </div>
+
                   <div className="flex space-x-4 pt-4">
                     <button
                       onClick={() => setCurrentView('dashboard')}
@@ -1765,13 +1939,25 @@ function App() {
                               {appt.time}
                             </td>
                             <td className="px-6 py-4 whitespace-nowrap text-sm text-right">
-                              <button
-                                onClick={() => handleDeleteAppointment(appt._id)}
-                                className="inline-flex items-center p-2 text-rose-600 hover:bg-rose-50 transition-colors rounded-lg"
-                                title="Delete Appointment"
-                              >
-                                <Trash2 className="w-4 h-4" />
-                              </button>
+                              <div className="flex justify-end space-x-1">
+                                <button
+                                  onClick={() => {
+                                    setRescheduleAppt(appt);
+                                    setRescheduleData({ date: appt.date || '', time: appt.time || '' });
+                                  }}
+                                  className="inline-flex items-center p-2 text-cyan-600 hover:bg-cyan-50 transition-colors rounded-lg"
+                                  title="Reschedule Appointment"
+                                >
+                                  <Edit2 className="w-4 h-4" />
+                                </button>
+                                <button
+                                  onClick={() => handleDeleteAppointment(appt._id)}
+                                  className="inline-flex items-center p-2 text-rose-600 hover:bg-rose-50 transition-colors rounded-lg"
+                                  title="Cancel Appointment"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </div>
                             </td>
                           </tr>
                         ))
@@ -1779,6 +1965,218 @@ function App() {
                         <tr>
                           <td colSpan="5" className="px-6 py-12 text-center text-slate-400 text-sm">
                             No appointments found.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Announcements View */}
+          {currentView === 'announcements' && (
+            <div className="space-y-6">
+              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+                <div>
+                  <h2 className="text-2xl font-bold text-slate-900 tracking-tight">Clinic Announcements</h2>
+                  <p className="text-sm text-slate-500 mt-1">
+                    Broadcast WhatsApp template announcements to opted-in patients ({optedInCount} opted-in with valid phone).
+                  </p>
+                </div>
+              </div>
+
+              <div className="bg-white shadow-xs p-6 md:p-8 border border-slate-200/80 rounded-2xl">
+                <h3 className="text-lg font-bold text-slate-900 mb-4 flex items-center">
+                  <Megaphone className="w-5 h-5 mr-2 text-cyan-600" />
+                  Send New Announcement
+                </h3>
+                <form onSubmit={handleSendAnnouncement} className="space-y-5">
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-1.5">Title</label>
+                      <input
+                        type="text"
+                        value={announcementForm.title}
+                        onChange={(e) => setAnnouncementForm({ ...announcementForm, title: e.target.value })}
+                        className="w-full px-3.5 py-2.5 border border-slate-300 rounded-lg text-sm text-slate-900 focus:ring-2 focus:ring-cyan-500/20 focus:border-cyan-600"
+                        placeholder="e.g., Holiday Notice"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-1.5">Closure / Effective Date *</label>
+                      <input
+                        type="date"
+                        value={announcementForm.closure_date}
+                        onChange={(e) => setAnnouncementForm({ ...announcementForm, closure_date: e.target.value })}
+                        className="w-full px-3.5 py-2.5 border border-slate-300 rounded-lg text-sm text-slate-900 focus:ring-2 focus:ring-cyan-500/20 focus:border-cyan-600"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-1.5">Reopening Date</label>
+                      <input
+                        type="date"
+                        value={announcementForm.reopening_date}
+                        onChange={(e) => setAnnouncementForm({ ...announcementForm, reopening_date: e.target.value })}
+                        className="w-full px-3.5 py-2.5 border border-slate-300 rounded-lg text-sm text-slate-900 focus:ring-2 focus:ring-cyan-500/20 focus:border-cyan-600"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1.5">Announcement Reason / Message *</label>
+                    <textarea
+                      rows="3"
+                      value={announcementForm.reason}
+                      onChange={(e) => setAnnouncementForm({ ...announcementForm, reason: e.target.value })}
+                      className="w-full px-3.5 py-2.5 border border-slate-300 rounded-lg text-sm text-slate-900 focus:ring-2 focus:ring-cyan-500/20 focus:border-cyan-600"
+                      placeholder="e.g., Clinic closed for Onam holiday / updated working hours..."
+                      required
+                    />
+                  </div>
+
+                  <div className="space-y-3">
+                    <label className="block text-sm font-medium text-slate-700">Recipients (Opted-In Patients Only)</label>
+                    <div className="flex flex-wrap gap-4">
+                      <label className="inline-flex items-center space-x-2 text-sm text-slate-700 cursor-pointer">
+                        <input
+                          type="radio"
+                          name="target_mode"
+                          value="all_opted_in"
+                          checked={announcementForm.target_mode === 'all_opted_in'}
+                          onChange={() => setAnnouncementForm({ ...announcementForm, target_mode: 'all_opted_in', regnos: [] })}
+                          className="text-cyan-600 focus:ring-cyan-500"
+                        />
+                        <span>All Opted-In Patients ({optedInPatients.length})</span>
+                      </label>
+                      <label className="inline-flex items-center space-x-2 text-sm text-slate-700 cursor-pointer">
+                        <input
+                          type="radio"
+                          name="target_mode"
+                          value="selected"
+                          checked={announcementForm.target_mode === 'selected'}
+                          onChange={() => setAnnouncementForm({ ...announcementForm, target_mode: 'selected' })}
+                          className="text-cyan-600 focus:ring-cyan-500"
+                        />
+                        <span>Selected Opted-In Patients ({announcementForm.regnos.length} selected)</span>
+                      </label>
+                    </div>
+
+                    {announcementForm.target_mode === 'selected' && (
+                      <div className="border border-slate-200 rounded-xl p-4 bg-slate-50/70 space-y-3">
+                        <div className="flex flex-col sm:flex-row gap-2 justify-between items-stretch sm:items-center">
+                          <input
+                            type="text"
+                            value={announcementSearch}
+                            onChange={(e) => setAnnouncementSearch(e.target.value)}
+                            placeholder="Filter patients by name, regno, or phone..."
+                            className="px-3 py-2 border border-slate-300 rounded-lg text-xs bg-white text-slate-900 w-full sm:w-72"
+                          />
+                          <div className="flex gap-2">
+                            <button
+                              type="button"
+                              onClick={() => setAnnouncementForm({
+                                ...announcementForm,
+                                regnos: optedInPatients.map((p) => p.regno)
+                              })}
+                              className="px-3 py-1.5 text-xs font-medium bg-white border border-slate-300 rounded-lg hover:bg-slate-100 text-slate-700"
+                            >
+                              Select All
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setAnnouncementForm({ ...announcementForm, regnos: [] })}
+                              className="px-3 py-1.5 text-xs font-medium bg-white border border-slate-300 rounded-lg hover:bg-slate-100 text-slate-700"
+                            >
+                              Clear
+                            </button>
+                          </div>
+                        </div>
+                        <div className="max-h-48 overflow-y-auto divide-y divide-slate-200 bg-white rounded-lg border border-slate-200">
+                          {optedInPatients
+                            .filter((p) => {
+                              const q = announcementSearch.trim().toLowerCase();
+                              if (!q) return true;
+                              return (
+                                (p.name || '').toLowerCase().includes(q) ||
+                                (p.regno || '').toLowerCase().includes(q) ||
+                                (p.phone || '').toLowerCase().includes(q)
+                              );
+                            })
+                            .map((p) => (
+                              <label
+                                key={p.regno}
+                                className="flex items-center justify-between px-3 py-2 text-xs hover:bg-slate-50 cursor-pointer"
+                              >
+                                <span className="flex items-center space-x-2.5">
+                                  <input
+                                    type="checkbox"
+                                    checked={announcementForm.regnos.includes(p.regno)}
+                                    onChange={() => handleToggleAnnouncementPatient(p.regno)}
+                                    className="h-4 w-4 text-cyan-600 border-slate-300 rounded"
+                                  />
+                                  <span className="font-semibold text-slate-800">{p.name}</span>
+                                  <span className="text-slate-500">({p.regno})</span>
+                                </span>
+                                <span className="text-slate-500">{p.phone}</span>
+                              </label>
+                            ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex justify-end">
+                    <button
+                      type="submit"
+                      disabled={loading || !announcementForm.closure_date || !announcementForm.reason.trim()}
+                      className="inline-flex items-center px-6 py-2.5 bg-cyan-600 text-white font-semibold rounded-lg hover:bg-cyan-700 disabled:bg-slate-200 disabled:text-slate-400 transition-colors text-sm shadow-xs"
+                    >
+                      <Send className="w-4 h-4 mr-2" />
+                      {loading ? 'Sending...' : 'Send Announcement'}
+                    </button>
+                  </div>
+                </form>
+              </div>
+
+              <div className="bg-white shadow-xs border border-slate-200/80 rounded-xl overflow-hidden">
+                <div className="px-6 py-4 border-b border-slate-200">
+                  <h3 className="text-base font-bold text-slate-900">Recent Announcements</h3>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full">
+                    <thead className="bg-slate-50 border-b border-slate-200">
+                      <tr>
+                        <th className="px-6 py-3 text-left text-xs font-semibold text-slate-600 uppercase">Effective Date</th>
+                        <th className="px-6 py-3 text-left text-xs font-semibold text-slate-600 uppercase">Reason</th>
+                        <th className="px-6 py-3 text-left text-xs font-semibold text-slate-600 uppercase">Reopening</th>
+                        <th className="px-6 py-3 text-left text-xs font-semibold text-slate-600 uppercase">Sent / Total</th>
+                        <th className="px-6 py-3 text-left text-xs font-semibold text-slate-600 uppercase">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 bg-white">
+                      {announcements.length > 0 ? (
+                        announcements.map((item) => (
+                          <tr key={item.broadcast_id || item._id} className="hover:bg-slate-50/80">
+                            <td className="px-6 py-3.5 text-xs font-medium text-slate-800 whitespace-nowrap">{item.closure_date}</td>
+                            <td className="px-6 py-3.5 text-xs text-slate-700">{item.reason}</td>
+                            <td className="px-6 py-3.5 text-xs text-slate-500 whitespace-nowrap">{item.reopening_date}</td>
+                            <td className="px-6 py-3.5 text-xs text-slate-700 whitespace-nowrap">
+                              {item.sent_count || 0} / {item.total_recipients || 0}
+                            </td>
+                            <td className="px-6 py-3.5 text-xs whitespace-nowrap">
+                              <span className="px-2.5 py-1 rounded-full bg-cyan-50 text-cyan-700 font-medium">
+                                {item.failed_count > 0 ? `${item.failed_count} failed` : 'Recorded'}
+                              </span>
+                            </td>
+                          </tr>
+                        ))
+                      ) : (
+                        <tr>
+                          <td colSpan="5" className="px-6 py-10 text-center text-slate-400 text-sm">
+                            No announcements sent yet.
                           </td>
                         </tr>
                       )}
@@ -1853,6 +2251,19 @@ function App() {
                     />
                   </div>
 
+                  <div className="flex items-center space-x-2">
+                    <input
+                      id="edit-whatsapp-opt-in"
+                      type="checkbox"
+                      checked={formData.whatsapp_opt_in !== false}
+                      onChange={(e) => setFormData({ ...formData, whatsapp_opt_in: e.target.checked })}
+                      className="h-4 w-4 text-cyan-600 border-slate-300 rounded focus:ring-cyan-500"
+                    />
+                    <label htmlFor="edit-whatsapp-opt-in" className="text-sm text-slate-700">
+                      Patient opted in for WhatsApp reminders & clinic announcements
+                    </label>
+                  </div>
+
                   <div className="flex space-x-4 pt-4">
                     <button
                       onClick={() => {
@@ -1893,10 +2304,38 @@ function App() {
                 <label className="text-xs font-semibold text-slate-600 uppercase">Select Time</label>
                 <input type="time" className="w-full mt-1.5 p-3 border border-slate-300 rounded-xl bg-white text-slate-900 text-sm focus:ring-2 focus:ring-cyan-500/20 focus:border-cyan-600" value={apptData.time} onChange={e => setApptData({...apptData, time: e.target.value})} />
               </div>
+              <div>
+                <label className="text-xs font-semibold text-slate-600 uppercase">Doctor Name (Optional)</label>
+                <input type="text" placeholder="e.g., Dr. Kuzhivelil" className="w-full mt-1.5 p-3 border border-slate-300 rounded-xl bg-white text-slate-900 text-sm focus:ring-2 focus:ring-cyan-500/20 focus:border-cyan-600" value={apptData.doctor_name} onChange={e => setApptData({...apptData, doctor_name: e.target.value})} />
+              </div>
             </div>
             <div className="flex gap-3 mt-8">
               <button onClick={() => setApptPatient(null)} className="flex-1 py-2.5 font-medium text-slate-600 hover:bg-slate-100 rounded-xl text-sm transition-colors border border-slate-200">Cancel</button>
               <button onClick={handleBookAppt} className="flex-1 py-2.5 font-semibold bg-cyan-600 text-white rounded-xl shadow-md hover:bg-cyan-700 text-sm transition-colors">Confirm</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Reschedule Appointment Modal */}
+      {rescheduleAppt && (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl p-8 max-w-sm w-full shadow-2xl border border-slate-200">
+            <h3 className="text-xl font-bold text-slate-900 mb-1">Reschedule Appointment</h3>
+            <p className="text-slate-500 text-xs mb-6">Updating for: <span className="font-semibold text-cyan-700">{rescheduleAppt.patient_name || rescheduleAppt.regno}</span></p>
+            <div className="space-y-4">
+              <div>
+                <label className="text-xs font-semibold text-slate-600 uppercase">New Date</label>
+                <input type="date" className="w-full mt-1.5 p-3 border border-slate-300 rounded-xl bg-white text-slate-900 text-sm focus:ring-2 focus:ring-cyan-500/20 focus:border-cyan-600" value={rescheduleData.date} onChange={e => setRescheduleData({...rescheduleData, date: e.target.value})} />
+              </div>
+              <div>
+                <label className="text-xs font-semibold text-slate-600 uppercase">New Time</label>
+                <input type="time" className="w-full mt-1.5 p-3 border border-slate-300 rounded-xl bg-white text-slate-900 text-sm focus:ring-2 focus:ring-cyan-500/20 focus:border-cyan-600" value={rescheduleData.time} onChange={e => setRescheduleData({...rescheduleData, time: e.target.value})} />
+              </div>
+            </div>
+            <div className="flex gap-3 mt-8">
+              <button onClick={() => setRescheduleAppt(null)} className="flex-1 py-2.5 font-medium text-slate-600 hover:bg-slate-100 rounded-xl text-sm transition-colors border border-slate-200">Cancel</button>
+              <button onClick={handleRescheduleAppt} className="flex-1 py-2.5 font-semibold bg-cyan-600 text-white rounded-xl shadow-md hover:bg-cyan-700 text-sm transition-colors">Update</button>
             </div>
           </div>
         </div>
