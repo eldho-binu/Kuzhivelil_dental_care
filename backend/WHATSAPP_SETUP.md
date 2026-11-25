@@ -16,7 +16,7 @@ Configure these environment variables in `backend/.env` for local development an
 | `WHATSAPP_PHONE_NUMBER_ID` | `1492317537289190` | Registered Meta WhatsApp Phone Number ID |
 | `WHATSAPP_BUSINESS_ACCOUNT_ID` | `2187192222184438` | Meta WhatsApp Business Account ID |
 | `WHATSAPP_API_VERSION` | `v23.0` | Meta Graph API version |
-| `WHATSAPP_RECIPIENT_NUMBER` | `91XXXXXXXXXX` | Fixed clinic/admin WhatsApp number receiving notifications |
+| `WHATSAPP_RECIPIENT_NUMBER` | *(optional)* | Optional override number; by default notifications go to the patient's phone number |
 | `WHATSAPP_ENABLED` | `true` | Enable (`true`) or disable (`false`) WhatsApp notifications |
 | `WHATSAPP_TEMPLATE_NEW_PATIENT` | `new_patient_notification` | Template name for new patient registration |
 | `WHATSAPP_TEMPLATE_NEW_APPOINTMENT` | `new_appointment_notification` | Template name for new appointment booking |

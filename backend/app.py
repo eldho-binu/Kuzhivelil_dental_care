@@ -858,12 +858,12 @@ def create_patient():
         result = patients_collection.insert_one(patient_doc)
         patient_doc['_id'] = result.inserted_id
 
-        # Notify clinic/admin WhatsApp number using Meta Cloud API template
+        # Notify newly registered patient's WhatsApp number using Meta Cloud API template
         try:
             whatsapp_service.send_new_patient_notification(
                 patient_name=patient_doc['name'],
                 regno=patient_doc['regno'],
-                phone_number=patient_doc.get('phone') or 'N/A',
+                phone_number=patient_doc.get('phone', ''),
             )
         except Exception as notify_err:
             print(f"New patient WhatsApp notification error: {notify_err}")
@@ -984,6 +984,13 @@ def delete_patient(regno):
                 'error': 'Patient not found'
             }), 404
 
+        try:
+            regno_val = str(existing_patient.get('regno') or existing_patient.get('Reg No') or '').strip().lower()
+            if regno_val:
+                whatsapp_service.invalidate_dedupe_key(f"new_patient:{regno_val}")
+        except Exception as dedupe_err:
+            print(f"Failed to clear patient notification dedupe key: {dedupe_err}")
+
         return jsonify({
             'success': True,
             'message': 'Patient deleted successfully'
@@ -1065,10 +1072,10 @@ def create_appointment():
 
         insert_result = db['appointments'].insert_one(appointment_doc)
 
-        # Notify clinic/admin WhatsApp number using Meta Cloud API template
+        # Notify patient's WhatsApp number using Meta Cloud API template
         try:
             patient_name = patient.get("name") or patient.get("Name") or "N/A"
-            patient_phone = patient.get("phone") or patient.get("Phone") or "N/A"
+            patient_phone = patient.get("phone") or patient.get("Phone") or ""
             whatsapp_service.send_new_appointment_notification(
                 patient_name=patient_name,
                 regno=canonical_regno,

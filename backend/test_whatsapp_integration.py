@@ -274,7 +274,7 @@ class WhatsAppIntegrationTestCase(unittest.TestCase):
         # Verify saved in MongoDB
         self.assertEqual(self.fake_db["patients"].count_documents({"regno": "KDC-101"}), 1)
 
-        # Verify Meta Cloud API was called once with fixed admin recipient and template
+        # Verify Meta Cloud API was called once with patient's normalized phone and template
         mock_post.assert_called_once()
         call_args = mock_post.call_args
         self.assertEqual(
@@ -282,7 +282,7 @@ class WhatsAppIntegrationTestCase(unittest.TestCase):
             "https://graph.facebook.com/v23.0/1492317537289190/messages",
         )
         payload = call_args.kwargs["json"]
-        self.assertEqual(payload["to"], "918848317301")
+        self.assertEqual(payload["to"], "919876543210")
         self.assertEqual(payload["type"], "template")
         self.assertEqual(payload["template"]["name"], "new_patient_notification")
         self.assertEqual(payload["template"]["language"]["code"], "en")
@@ -324,10 +324,10 @@ class WhatsAppIntegrationTestCase(unittest.TestCase):
             self.fake_db["appointments"].count_documents({"regno": "KDC-202"}), 1
         )
 
-        # Verify Meta Cloud API call goes to clinic/admin recipient (NOT patient phone)
+        # Verify Meta Cloud API call goes to the booked patient's phone
         mock_post.assert_called_once()
         payload = mock_post.call_args.kwargs["json"]
-        self.assertEqual(payload["to"], "918848317301")
+        self.assertEqual(payload["to"], "919123456789")
         self.assertEqual(payload["template"]["name"], "new_appointment_notification")
         params = [p["text"] for p in payload["template"]["components"][0]["parameters"]]
         self.assertEqual(
@@ -475,6 +475,17 @@ class WhatsAppIntegrationTestCase(unittest.TestCase):
         self.assertEqual(dup_result["status"], "duplicate_suppressed")
         self.assertEqual(mock_post.call_count, 2)
 
+        # Deleting patient clears dedupe lock so re-registering sends again
+        del_res = self.client.delete("/api/patients/KDC-606", headers=self.auth_headers)
+        self.assertEqual(del_res.status_code, 200)
+        p3 = self.client.post(
+            "/api/patients",
+            headers=self.auth_headers,
+            json={"regno": "KDC-606", "name": "Arjun K", "phone": "9898989898", "age": 22},
+        )
+        self.assertEqual(p3.status_code, 201)
+        self.assertEqual(mock_post.call_count, 3)
+
     @patch("services.whatsapp_service.requests.post")
     def test_7_unauthenticated_and_validation_failures_never_notify(self, mock_post):
         unauth_p = self.client.post(
@@ -514,6 +525,20 @@ class WhatsAppIntegrationTestCase(unittest.TestCase):
         logs_text = log_stream.getvalue()
         self.assertIn("WhatsApp notification sent", logs_text)
         self.assertNotIn("test_secret_meta_token_12345", logs_text)
+
+    @patch("services.whatsapp_service.requests.post")
+    def test_9_missing_patient_phone_skips_cleanly(self, mock_post):
+        res = self.client.post(
+            "/api/patients",
+            headers=self.auth_headers,
+            json={"regno": "KDC-909", "name": "No Phone Patient", "phone": "", "age": 30},
+        )
+        self.assertEqual(res.status_code, 201)
+        mock_post.assert_not_called()
+        logs = list(self.fake_db["whatsapp_notifications"].find({"entity_id": "KDC-909"}))
+        self.assertEqual(len(logs), 1)
+        self.assertEqual(logs[0]["status"], "skipped")
+        self.assertIn("Recipient phone number not provided", logs[0]["error"])
 
 
 if __name__ == "__main__":

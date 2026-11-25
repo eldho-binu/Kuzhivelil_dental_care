@@ -283,11 +283,32 @@ class WhatsAppService:
             missing.append("WHATSAPP_ACCESS_TOKEN")
         if not config["phone_number_id"]:
             missing.append("WHATSAPP_PHONE_NUMBER_ID")
-        if not to_phone or not str(to_phone).strip():
-            missing.append("WHATSAPP_RECIPIENT_NUMBER")
 
         if missing:
             reason = f"Missing required WhatsApp configuration: {', '.join(missing)}"
+            logger.warning("Skipping WhatsApp notification (%s): %s", template_name, reason)
+            self._record_notification_log(
+                event_type=event_type,
+                template_name=template_name,
+                language_code=resolved_language,
+                recipient_masked=recipient_masked,
+                status="skipped",
+                dedupe_key=dedupe_key,
+                entity_id=entity_id,
+                error=reason,
+            )
+            return {
+                "success": False,
+                "skipped": True,
+                "status": "skipped",
+                "template_name": template_name,
+                "recipient": recipient_masked,
+                "reason": reason,
+                "error": None,
+            }
+
+        if not to_phone or not str(to_phone).strip() or str(to_phone).strip().upper() == "N/A":
+            reason = "Recipient phone number not provided"
             logger.warning("Skipping WhatsApp notification (%s): %s", template_name, reason)
             self._record_notification_log(
                 event_type=event_type,
@@ -525,13 +546,15 @@ class WhatsAppService:
         patient_name: str,
         regno: str,
         phone_number: Optional[str],
+        recipient_phone: Optional[str] = None,
         dedupe_key: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Notify the configured clinic/admin number when a new patient is registered."""
+        """Notify the newly registered patient's WhatsApp number."""
         config = self._get_config()
+        target_phone = recipient_phone if (recipient_phone and str(recipient_phone).strip()) else phone_number
         resolved_dedupe = dedupe_key or f"new_patient:{str(regno).strip().lower()}"
         return self.send_template_message(
-            to_phone=config["recipient_number"],
+            to_phone=target_phone,
             template_name=config["template_new_patient"],
             parameters=[
                 patient_name,
@@ -552,17 +575,19 @@ class WhatsAppService:
         appointment_date: str,
         appointment_time: str,
         patient_phone: Optional[str],
+        recipient_phone: Optional[str] = None,
         appointment_id: Optional[str] = None,
         dedupe_key: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Notify the configured clinic/admin number when a new appointment is booked."""
+        """Notify the patient's WhatsApp number when a new appointment is booked."""
         config = self._get_config()
+        target_phone = recipient_phone if (recipient_phone and str(recipient_phone).strip()) else patient_phone
         resolved_dedupe = (
             dedupe_key
             or f"new_appointment:{str(regno).strip().lower()}:{str(appointment_date).strip()}:{str(appointment_time).strip()}"
         )
         return self.send_template_message(
-            to_phone=config["recipient_number"],
+            to_phone=target_phone,
             template_name=config["template_new_appointment"],
             parameters=[
                 patient_name,
