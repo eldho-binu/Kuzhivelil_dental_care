@@ -14,7 +14,7 @@ import traceback
 import re
 import urllib.parse
 import requests
-import threading
+from services.whatsapp_service import whatsapp_service
 try:
     import certifi
     ca = certifi.where()
@@ -136,6 +136,17 @@ def format_time_12h(time_str):
         return dt.strftime("%I:%M %p")
     except Exception:
         return time_str
+
+
+def format_date_readable(date_str):
+    """Convert YYYY-MM-DD date string to readable DD MMM YYYY format."""
+    try:
+        if not date_str:
+            return date_str
+        dt = datetime.strptime(str(date_str).strip(), "%Y-%m-%d")
+        return dt.strftime("%d %b %Y")
+    except Exception:
+        return str(date_str)
 
 # JWT Helper Functions
 def generate_token(admin_id, username):
@@ -358,59 +369,7 @@ def validate_patient_data(data, is_update=False):
     return errors
 # ==================== WHATSAPP INTEGRATION ====================
 
-
-
-WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN")
-WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
-
-
-def send_whatsapp(phone, message):
-    try:
-        url = f"https://graph.facebook.com/v23.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
-
-        headers = {
-            "Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}",
-            "Content-Type": "application/json"
-        }
-
-        payload = {
-            "messaging_product": "whatsapp",
-            "recipient_type": "individual",
-            "to": phone,
-            "type": "text",
-            "text": {
-                "body": message
-            }
-        }
-
-        response = requests.post(
-            url,
-            headers=headers,
-            json=payload,
-            timeout=20
-        )
-
-        print("========== WHATSAPP ==========")
-        print("Status:", response.status_code)
-        print("Response:", response.text)
-        print("==============================")
-
-        return response.status_code == 200
-
-    except Exception as e:
-        print("WhatsApp Error:", e)
-        return False
-
-
-def send_whatsapp_async(phone, message):
-    """Send WhatsApp message in a separate thread to avoid blocking the main request"""
-    try:
-        thread = threading.Thread(target=send_whatsapp, args=(phone, message))
-        thread.daemon = True
-        thread.start()
-        print(f"🧵 WhatsApp thread started for {phone}")
-    except Exception as e:
-        print(f"❌ Failed to start WhatsApp thread: {e}")
+whatsapp_service.set_db_getter(lambda: db)
 
 # Update the authentication functions
 
@@ -898,17 +857,16 @@ def create_patient():
         # Insert patient
         result = patients_collection.insert_one(patient_doc)
         patient_doc['_id'] = result.inserted_id
-        
-        if patient_doc.get("phone"):
-          phone = "91" + "".join(filter(str.isdigit, patient_doc["phone"]))
-          msg = (
-              f"🦷 *Kuzhivelil Multi Speciality Dental Care* 🦷\n\n"
-              f"📄 *OP Number:* {patient_doc['regno']}\n"
-              f"👤 *Patient Name:* {patient_doc['name']}\n\n"
-              f"Thank you for choosing us for your dental care needs.\n"
-              f"We’re excited to continue keeping your smile healthy and bright✨...!"
-          )
-          send_whatsapp(phone, msg)
+
+        # Notify clinic/admin WhatsApp number using Meta Cloud API template
+        try:
+            whatsapp_service.send_new_patient_notification(
+                patient_name=patient_doc['name'],
+                regno=patient_doc['regno'],
+                phone_number=patient_doc.get('phone') or 'N/A',
+            )
+        except Exception as notify_err:
+            print(f"New patient WhatsApp notification error: {notify_err}")
 
         return jsonify({
             'success': True,
@@ -1043,16 +1001,35 @@ def delete_patient(regno):
 @require_auth
 def create_appointment():
     try:
-        data = request.get_json()
+        if not check_db_connection() or db is None:
+            return jsonify({
+                "success": False,
+                "error": "Database connection failed"
+            }), 503
 
-        regno = data.get("regno")
-        date = data.get("date")
-        time = data.get("time")
+        data = request.get_json()
+        if not data:
+            return jsonify({
+                "success": False,
+                "error": "No data provided"
+            }), 400
+
+        regno = str(data.get("regno") or "").strip()
+        date = str(data.get("date") or "").strip()
+        time = str(data.get("time") or "").strip()
 
         if not regno or not date or not time:
             return jsonify({
                 "success": False,
                 "error": "regno, date and time required"
+            }), 400
+
+        try:
+            appt_datetime = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M")
+        except ValueError:
+            return jsonify({
+                "success": False,
+                "error": "Invalid date or time format. Expected YYYY-MM-DD and HH:MM"
             }), 400
 
         patient = find_patient_by_regno(regno)
@@ -1063,32 +1040,46 @@ def create_appointment():
                 "error": "Patient not found"
             }), 404
 
-        # Save appointment
-        appointment_doc = {
-            "regno": regno,
+        canonical_regno = str(patient.get("regno") or patient.get("Reg No") or regno).strip()
+
+        # Prevent duplicate booking & unintended duplicate WhatsApp notifications
+        existing_appt = db['appointments'].find_one({
+            "regno": {"$in": list({regno, canonical_regno})},
             "date": date,
             "time": time,
-            "datetime": datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M"),
+        })
+        if existing_appt:
+            return jsonify({
+                "success": False,
+                "error": "Appointment already scheduled for this date and time"
+            }), 409
+
+        # Save appointment
+        appointment_doc = {
+            "regno": canonical_regno,
+            "date": date,
+            "time": time,
+            "datetime": appt_datetime,
             "created_at": datetime.now()
         }
 
-        db['appointments'].insert_one(appointment_doc)
+        insert_result = db['appointments'].insert_one(appointment_doc)
 
-        # 🔥 SEND WHATSAPP MESSAGE
-        if patient.get("phone"):
-            phone = "91" + "".join(filter(str.isdigit, patient["phone"]))
-            message = (
-                f"🦷 *Kuzhivelil Dental Care*\n\n"
-                f"Dear Patient,\n"
-                f"Your appointment has been successfully booked with *Kuzhivelil Dental Care*.\n\n"
-                f"📅 *Date:* {date}\n"
-                f"⏰ *Time:* {format_time_12h(time)}\n\n"
-                f"Please arrive 10 minutes early for your consultation. For any changes or queries, feel free to contact us at 📞 +91 82812 95098.\n\n"
-                f"We look forward to taking care of your smile! 😊\n\n"
-                f"— *This is an automated system-generated message*"
+        # Notify clinic/admin WhatsApp number using Meta Cloud API template
+        try:
+            patient_name = patient.get("name") or patient.get("Name") or "N/A"
+            patient_phone = patient.get("phone") or patient.get("Phone") or "N/A"
+            whatsapp_service.send_new_appointment_notification(
+                patient_name=patient_name,
+                regno=canonical_regno,
+                appointment_date=format_date_readable(date),
+                appointment_time=format_time_12h(time),
+                patient_phone=patient_phone,
+                appointment_id=str(insert_result.inserted_id),
+                dedupe_key=f"new_appointment:{canonical_regno.lower()}:{date}:{time}",
             )
-
-            send_whatsapp(phone, message)
+        except Exception as notify_err:
+            print(f"New appointment WhatsApp notification error: {notify_err}")
 
         return jsonify({
             "success": True,
@@ -1196,28 +1187,6 @@ def update_appointment(id):
         
         if result.matched_count == 0:
             return jsonify({'success': False, 'error': 'Appointment not found'}), 404
-            
-        # 🔥 SEND WHATSAPP MESSAGE FOR RESCHEDULE
-        try:
-            # Get appointment details to find patient
-            appt = db['appointments'].find_one({'_id': ObjectId(id)})
-            if appt:
-                patient = find_patient_by_regno(appt['regno'])
-                if patient and patient.get("phone"):
-                    phone = "91" + "".join(filter(str.isdigit, patient["phone"]))
-                    message = (
-                        f"🦷 *Kuzhivelil Dental Care*\n\n"
-                        f"Dear Patient,\n"
-                        f"Your appointment has been successfully *rescheduled* with *Kuzhivelil Dental Care*.\n\n"
-                        f"📅 *Date:* {date}\n"
-                        f"⏰ *Time:* {format_time_12h(time)}\n\n"
-                        f"Please arrive 10 minutes early for your consultation. For any changes or queries, feel free to contact us at 📞 +91 82812 95098.\n\n"
-                        f"We look forward to taking care of your smile! 😊\n\n"
-                        f"— *This is an automated system-generated message*"
-                    )
-                    send_whatsapp_async(phone, message)
-        except Exception as e:
-            print(f"Failed to send reschedule notification: {e}")
 
         return jsonify({
             'success': True,
@@ -1238,12 +1207,23 @@ def delete_appointment(id):
     try:
         if not ObjectId.is_valid(id):
             return jsonify({'success': False, 'error': 'Invalid appointment ID'}), 400
-            
-        result = db['appointments'].delete_one({'_id': ObjectId(id)})
-        
-        if result.deleted_count == 0:
+
+        deleted_appt = db['appointments'].find_one_and_delete({'_id': ObjectId(id)})
+
+        if not deleted_appt:
             return jsonify({'success': False, 'error': 'Appointment not found'}), 404
-            
+
+        try:
+            regno = str(deleted_appt.get('regno') or '').strip().lower()
+            date = str(deleted_appt.get('date') or '').strip()
+            time = str(deleted_appt.get('time') or '').strip()
+            if regno and date and time:
+                whatsapp_service.invalidate_dedupe_key(
+                    f"new_appointment:{regno}:{date}:{time}"
+                )
+        except Exception as dedupe_err:
+            print(f"Failed to clear appointment notification dedupe key: {dedupe_err}")
+
         return jsonify({
             'success': True,
             'message': 'Appointment deleted successfully'
@@ -1259,6 +1239,14 @@ def delete_appointment(id):
 @app.route('/api/reminder', methods=['GET'])
 def send_reminders():
     try:
+        reminder_template = (os.getenv("WHATSAPP_TEMPLATE_REMINDER") or "").strip()
+        if not reminder_template:
+            return jsonify({
+                "success": True,
+                "sent": 0,
+                "message": "Reminder template not configured"
+            })
+
         now = datetime.now()
         future = now + timedelta(hours=6)
 
@@ -1272,12 +1260,20 @@ def send_reminders():
             patient = find_patient_by_regno(appt["regno"])
 
             if patient and patient.get("phone"):
-                phone = "91" + ''.join(filter(str.isdigit, patient["phone"]))
-
-                message = f"Reminder: Your appointment is at {format_time_12h(appt['time'])} today."
-
-                send_whatsapp_async(phone, message)
-                count += 1
+                result = whatsapp_service.send_template_message(
+                    to_phone=patient["phone"],
+                    template_name=reminder_template,
+                    parameters=[
+                        patient.get("name") or patient.get("Name") or "Patient",
+                        format_date_readable(appt.get("date")),
+                        format_time_12h(appt.get("time")),
+                    ],
+                    event_type="appointment_reminder",
+                    dedupe_key=f"reminder:{str(appt.get('_id'))}",
+                    entity_id=str(appt.get("_id")),
+                )
+                if result.get("success") and not result.get("duplicate"):
+                    count += 1
 
         return jsonify({
             "success": True,
