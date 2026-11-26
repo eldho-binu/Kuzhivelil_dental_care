@@ -797,6 +797,36 @@ class WhatsAppIntegrationTestCase(unittest.TestCase):
         self.assertEqual(len(data["next_appointments"]), 1)
         self.assertEqual(data["next_appointments"][0]["patient_name"], "Stats Patient")
 
+    def test_get_appointments_auto_deletes_older_appointments(self):
+        self.fake_db["patients"].insert_one(
+            {"regno": "KDC-OLD", "name": "Old Test", "phone": "9876543210", "age": 30}
+        )
+        self.fake_db["appointments"].insert_one(
+            {
+                "regno": "KDC-OLD",
+                "date": "2020-01-01",
+                "time": "10:00",
+                "datetime": datetime(2020, 1, 1, 10, 0),
+                "created_at": datetime.now(),
+            }
+        )
+        self.fake_db["appointments"].insert_one(
+            {
+                "regno": "KDC-OLD",
+                "date": "2099-12-31",
+                "time": "10:00",
+                "datetime": datetime(2099, 12, 31, 10, 0),
+                "created_at": datetime.now(),
+            }
+        )
+
+        res = self.client.get("/api/appointments", headers=self.auth_headers)
+        self.assertEqual(res.status_code, 200)
+        appts = res.get_json()["data"]
+        self.assertEqual(len(appts), 1)
+        self.assertEqual(appts[0]["date"], "2099-12-31")
+        self.assertEqual(self.fake_db["appointments"].count_documents({"date": "2020-01-01"}), 0)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

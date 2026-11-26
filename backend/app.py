@@ -1155,10 +1155,32 @@ def create_appointment():
             "error": "Failed to schedule appointment"
         }), 500
 
+def _cleanup_past_appointments():
+    """Auto-delete appointments older than today (Asia/Kolkata) and expire stale pending reminders."""
+    if db is None:
+        return
+    ist_now = datetime.now(IST)
+    today_start = ist_now.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
+    today_ist_str = today_start.strftime('%Y-%m-%d')
+    db['appointments'].delete_many({
+        '$or': [
+            {'datetime': {'$lt': today_start}},
+            {'date': {'$lt': today_ist_str}},
+        ]
+    })
+    try:
+        db['appointment_reminders'].update_many(
+            {'status': 'pending', 'appointment_date': {'$lt': today_ist_str}},
+            {'$set': {'status': 'expired', 'updated_at': datetime.utcnow()}},
+        )
+    except Exception:
+        pass
+
+
 @app.route('/api/appointments', methods=['GET'])
 @require_auth
 def get_appointments():
-    """Get all appointments, auto-deleting past ones, and grouped by date"""
+    """Get all upcoming appointments, auto-deleting past ones"""
     try:
         if not check_db_connection() or db is None:
             return jsonify({
@@ -1167,9 +1189,7 @@ def get_appointments():
             }), 503
 
         # Auto-delete past appointments (older than today in Asia/Kolkata)
-        ist_now = datetime.now(IST)
-        today_start = ist_now.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
-        db['appointments'].delete_many({'datetime': {'$lt': today_start}})
+        _cleanup_past_appointments()
 
         # Get query parameters
         search = request.args.get('search', '').strip()
@@ -1694,6 +1714,9 @@ def get_dashboard_stats():
                 'month_registrations': 0,
                 'latest_patients': []
             })
+
+        # Auto-clean past appointments before computing dashboard counts
+        _cleanup_past_appointments()
 
         # Get current date info in Asia/Kolkata
         ist_now = datetime.now(IST).replace(tzinfo=None)
