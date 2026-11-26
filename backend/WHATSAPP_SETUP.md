@@ -7,12 +7,12 @@
   - All `WHATSAPP_*` secrets live strictly in the **Flask backend environment (Render / `backend/.env`)**, never in Vercel frontend JS.
   - **Security reminder**: If an access token was ever pasted into chat, logs, or source code, generate a fresh permanent System User token in Meta Business Settings before production deployment.
 
-## 2. Strict Recipient Rules
+## 2. Recipient Rules
 
 - **Clinic/Admin Notifications** (`WHATSAPP_ADMIN_PHONE`):
-  1. `new_patient_notification` (New patient registration)
-  2. `new_appointment_notification` (New appointment booking)
+  1. `new_appointment_notification` (New appointment booking)
 - **Patient Notifications** (patient's registered phone number):
+  2. `new_patient_notification` (New patient registration)
   3. `clinic_announcement` (General clinic announcements to selected/all opted-in patients)
   4. `appointment_reminder_5hrs` (Automatic reminder 5 hours before appointment in `Asia/Kolkata`)
   5. `appointment_cancellation` (Immediate notification when receptionist cancels an appointment)

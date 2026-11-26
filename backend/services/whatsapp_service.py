@@ -663,7 +663,7 @@ class WhatsAppService:
             "error_code": error_code,
         }
 
-    # --- Feature 1: Clinic/Admin Notification on New Patient Registration ---
+    # --- Feature 1: Patient Notification on New Patient Registration ---
     def send_new_patient_notification(
         self,
         *,
@@ -672,11 +672,11 @@ class WhatsAppService:
         phone_number: Optional[str],
         dedupe_key: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Notify the fixed clinic/admin WhatsApp number when a new patient registers."""
+        """Notify the newly registered patient's WhatsApp phone number."""
         config = self._get_config()
         resolved_dedupe = dedupe_key or f"new_patient:{str(regno).strip().lower()}"
         return self.send_template_message(
-            to_phone=config["admin_phone"],
+            to_phone=phone_number,
             template_name=config["template_patient"],
             parameters=[
                 patient_name,
@@ -688,7 +688,7 @@ class WhatsAppService:
             dedupe_key=resolved_dedupe,
             regno=str(regno).strip(),
             entity_id=str(regno).strip(),
-            missing_recipient_reason="Missing required WhatsApp configuration: WHATSAPP_ADMIN_PHONE",
+            missing_recipient_reason="Patient phone number not provided",
         )
 
     # --- Feature 2: Clinic/Admin Notification on New Appointment Booking ---

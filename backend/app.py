@@ -854,15 +854,16 @@ def create_patient():
         result = patients_collection.insert_one(patient_doc)
         patient_doc['_id'] = result.inserted_id
 
-        # Feature 1: Notify fixed clinic/admin WhatsApp number on new patient registration
-        try:
-            whatsapp_service.send_new_patient_notification(
-                patient_name=patient_doc['name'],
-                regno=patient_doc['regno'],
-                phone_number=patient_doc.get('phone', ''),
-            )
-        except Exception as notify_err:
-            print(f"New patient WhatsApp notification error: {notify_err}")
+        # Feature 1: Notify newly registered patient's WhatsApp number
+        if patient_doc.get('whatsapp_opt_in', True) is not False:
+            try:
+                whatsapp_service.send_new_patient_notification(
+                    patient_name=patient_doc['name'],
+                    regno=patient_doc['regno'],
+                    phone_number=patient_doc.get('phone', ''),
+                )
+            except Exception as notify_err:
+                print(f"New patient WhatsApp notification error: {notify_err}")
 
         return jsonify({
             'success': True,

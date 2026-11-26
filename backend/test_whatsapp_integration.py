@@ -276,7 +276,7 @@ class WhatsAppIntegrationTestCase(unittest.TestCase):
         self.assertIsNotNone(err)
 
     @patch("services.whatsapp_service.requests.post")
-    def test_01_new_patient_registration_notifies_clinic_admin(self, mock_post):
+    def test_01_new_patient_registration_notifies_patient_phone(self, mock_post):
         mock_post.return_value = self._mock_meta_success("wamid.patient.1")
 
         res = self.client.post(
@@ -295,8 +295,8 @@ class WhatsAppIntegrationTestCase(unittest.TestCase):
 
         mock_post.assert_called_once()
         payload = mock_post.call_args.kwargs["json"]
-        # Clinic/admin receives registration alert (NOT patient phone)
-        self.assertEqual(payload["to"], "918848317301")
+        # New patient notification goes to the registered patient's phone number
+        self.assertEqual(payload["to"], "919876543210")
         self.assertEqual(payload["template"]["name"], "new_patient_notification")
         params = [p["text"] for p in payload["template"]["components"][0]["parameters"]]
         self.assertEqual(params, ["Ananya Nair", "KDC-101", "9876543210"])
@@ -543,6 +543,12 @@ class WhatsAppIntegrationTestCase(unittest.TestCase):
         self.assertEqual(p1.status_code, 201)
         self.assertEqual(p2.status_code, 400)
         self.assertEqual(mock_post.call_count, 1)
+
+        # Duplicate event assertions continue below
+        self.assertEqual(
+            self.fake_db["whatsapp_notifications"].find_one({"regno": "KDC-808"})["recipient_phone"],
+            "919898989898",
+        )
 
         a1 = self.client.post(
             "/api/appointments",
