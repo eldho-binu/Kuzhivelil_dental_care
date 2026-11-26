@@ -18,7 +18,9 @@ import {
   AlertCircle,
   Download, // Add Download icon
   Megaphone,
-  Send
+  Send,
+  ChevronDown,
+  ChevronRight
 } from 'lucide-react';
 import clinicLogo from './assets/Logo.png';
 
@@ -614,6 +616,7 @@ function App() {
   const [totalPages, setTotalPages] = useState(1);
   const [totalCount, setTotalCount] = useState(0);
   const [appointments, setAppointments] = useState([]); // NEW: For Appointment Tracking
+  const [expandedApptDates, setExpandedApptDates] = useState({});
   const [searchQuery, setSearchQuery] = useState('');
   const [searchMode, setSearchMode] = useState(false);
     // Modals / Selection
@@ -837,6 +840,23 @@ function App() {
       setLoading(false);
     }
   };
+
+  const toggleAppointmentDate = (dateStr) => {
+    setExpandedApptDates((prev) => ({
+      ...prev,
+      [dateStr]: !prev[dateStr]
+    }));
+  };
+
+  const groupedAppointments = React.useMemo(() => {
+    const groups = {};
+    appointments.forEach((appt) => {
+      const key = appt.date || 'Unknown Date';
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(appt);
+    });
+    return Object.entries(groups).sort(([a], [b]) => a.localeCompare(b));
+  }, [appointments]);
 
   const handleBookAppt = async () => {
     if (!apptPatient || !apptData.date || !apptData.time) {
@@ -1934,40 +1954,80 @@ function App() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100 bg-white">
-                      {appointments.length > 0 ? (
-                        appointments.map((appt, idx) => (
-                          <tr key={idx} className="hover:bg-slate-50/80 transition-colors">
-                            <td className="px-6 py-4 whitespace-nowrap text-xs text-slate-900 font-semibold">
-                              {appt.patient_name || 'Unknown'}
-                            </td>
-                            <td className="px-6 py-4 whitespace-nowrap text-xs text-slate-600">{appt.regno}</td>
-                            <td className="px-6 py-4 whitespace-nowrap text-xs text-slate-600 font-medium">{appt.date}</td>
-                            <td className="px-6 py-4 whitespace-nowrap text-xs font-bold text-cyan-700">
-                              {appt.time}
-                            </td>
-                            <td className="px-6 py-4 whitespace-nowrap text-sm text-right">
-                              <div className="flex justify-end space-x-1">
-                                <button
-                                  onClick={() => {
-                                    setRescheduleAppt(appt);
-                                    setRescheduleData({ date: appt.date || '', time: appt.time || '' });
-                                  }}
-                                  className="inline-flex items-center p-2 text-cyan-600 hover:bg-cyan-50 transition-colors rounded-lg"
-                                  title="Reschedule Appointment"
+                      {groupedAppointments.length > 0 ? (
+                        groupedAppointments.map(([dateKey, dayAppts]) => {
+                          const hasMultiple = dayAppts.length > 1;
+                          const isExpanded = !hasMultiple || !!expandedApptDates[dateKey];
+
+                          return (
+                            <React.Fragment key={dateKey}>
+                              {hasMultiple && (
+                                <tr
+                                  onClick={() => toggleAppointmentDate(dateKey)}
+                                  className="bg-cyan-50/60 hover:bg-cyan-50 cursor-pointer transition-colors"
                                 >
-                                  <Edit2 className="w-4 h-4" />
-                                </button>
-                                <button
-                                  onClick={() => handleDeleteAppointment(appt._id)}
-                                  className="inline-flex items-center p-2 text-rose-600 hover:bg-rose-50 transition-colors rounded-lg"
-                                  title="Cancel Appointment"
-                                >
-                                  <Trash2 className="w-4 h-4" />
-                                </button>
-                              </div>
-                            </td>
-                          </tr>
-                        ))
+                                  <td colSpan="5" className="px-6 py-3.5 text-xs">
+                                    <div className="flex items-center justify-between">
+                                      <div className="flex items-center space-x-2.5">
+                                        {isExpanded ? (
+                                          <ChevronDown className="w-4 h-4 text-cyan-700" />
+                                        ) : (
+                                          <ChevronRight className="w-4 h-4 text-cyan-700" />
+                                        )}
+                                        <Calendar className="w-4 h-4 text-cyan-600" />
+                                        <span className="font-bold text-slate-900 text-sm">{dateKey}</span>
+                                        <span className="px-2.5 py-0.5 rounded-full bg-cyan-100 text-cyan-800 font-semibold text-xs">
+                                          {dayAppts.length} Appointments
+                                        </span>
+                                      </div>
+                                      <span className="text-xs font-medium text-cyan-700">
+                                        {isExpanded ? 'Click to collapse' : 'Click to view appointments'}
+                                      </span>
+                                    </div>
+                                  </td>
+                                </tr>
+                              )}
+
+                              {isExpanded &&
+                                dayAppts.map((appt) => (
+                                  <tr
+                                    key={appt._id || `${appt.regno}-${appt.date}-${appt.time}`}
+                                    className={`hover:bg-slate-50/80 transition-colors ${hasMultiple ? 'bg-slate-50/30' : ''}`}
+                                  >
+                                    <td className={`px-6 py-4 whitespace-nowrap text-xs text-slate-900 font-semibold ${hasMultiple ? 'pl-12' : ''}`}>
+                                      {appt.patient_name || 'Unknown'}
+                                    </td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-xs text-slate-600">{appt.regno}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-xs text-slate-600 font-medium">{appt.date}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-xs font-bold text-cyan-700">
+                                      {appt.time}
+                                    </td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-right">
+                                      <div className="flex justify-end space-x-1">
+                                        <button
+                                          onClick={() => {
+                                            setRescheduleAppt(appt);
+                                            setRescheduleData({ date: appt.date || '', time: appt.time || '' });
+                                          }}
+                                          className="inline-flex items-center p-2 text-cyan-600 hover:bg-cyan-50 transition-colors rounded-lg"
+                                          title="Reschedule Appointment"
+                                        >
+                                          <Edit2 className="w-4 h-4" />
+                                        </button>
+                                        <button
+                                          onClick={() => handleDeleteAppointment(appt._id)}
+                                          className="inline-flex items-center p-2 text-rose-600 hover:bg-rose-50 transition-colors rounded-lg"
+                                          title="Cancel Appointment"
+                                        >
+                                          <Trash2 className="w-4 h-4" />
+                                        </button>
+                                      </div>
+                                    </td>
+                                  </tr>
+                                ))}
+                            </React.Fragment>
+                          );
+                        })
                       ) : (
                         <tr>
                           <td colSpan="5" className="px-6 py-12 text-center text-slate-400 text-sm">
