@@ -302,7 +302,7 @@ class WhatsAppIntegrationTestCase(unittest.TestCase):
         self.assertEqual(params, ["Ananya Nair", "KDC-101", "9876543210"])
 
     @patch("services.whatsapp_service.requests.post")
-    def test_02_new_appointment_booking_notifies_clinic_admin_and_schedules_reminder(self, mock_post):
+    def test_02_new_appointment_booking_notifies_patient_and_schedules_reminder(self, mock_post):
         self.fake_db["patients"].insert_one(
             {
                 "regno": "KDC-202",
@@ -329,8 +329,8 @@ class WhatsAppIntegrationTestCase(unittest.TestCase):
 
         mock_post.assert_called_once()
         payload = mock_post.call_args.kwargs["json"]
-        # Clinic/admin receives booking alert (NOT patient phone)
-        self.assertEqual(payload["to"], "918848317301")
+        # Appointment notification goes to the booked patient's phone
+        self.assertEqual(payload["to"], "919123456789")
         self.assertEqual(payload["template"]["name"], "new_appointment_notification")
         params = [p["text"] for p in payload["template"]["components"][0]["parameters"]]
         self.assertEqual(

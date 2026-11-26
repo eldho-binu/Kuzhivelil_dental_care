@@ -1127,19 +1127,20 @@ def create_appointment():
         except Exception as sched_err:
             print(f"Reminder scheduling error: {sched_err}")
 
-        # Feature 2: Notify fixed clinic/admin WhatsApp number on new appointment booking
-        try:
-            whatsapp_service.send_new_appointment_notification(
-                patient_name=patient_name,
-                regno=canonical_regno,
-                appointment_date=format_date_readable(date),
-                appointment_time=format_time_12h(time),
-                patient_phone=patient_phone,
-                appointment_id=appt_id_str,
-                dedupe_key=f"new_appointment:{canonical_regno.lower()}:{date}:{time}",
-            )
-        except Exception as notify_err:
-            print(f"New appointment WhatsApp notification error: {notify_err}")
+        # Feature 2: Notify patient's WhatsApp number on new appointment booking
+        if patient.get('whatsapp_opt_in', True) is not False:
+            try:
+                whatsapp_service.send_new_appointment_notification(
+                    patient_name=patient_name,
+                    regno=canonical_regno,
+                    appointment_date=format_date_readable(date),
+                    appointment_time=format_time_12h(time),
+                    patient_phone=patient_phone,
+                    appointment_id=appt_id_str,
+                    dedupe_key=f"new_appointment:{canonical_regno.lower()}:{date}:{time}",
+                )
+            except Exception as notify_err:
+                print(f"New appointment WhatsApp notification error: {notify_err}")
 
         return jsonify({
             "success": True,

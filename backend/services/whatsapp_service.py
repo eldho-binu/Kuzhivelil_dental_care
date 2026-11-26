@@ -700,7 +700,7 @@ class WhatsAppService:
             missing_recipient_reason="Patient phone number not provided",
         )
 
-    # --- Feature 2: Clinic/Admin Notification on New Appointment Booking ---
+    # --- Feature 2: Patient Notification on New Appointment Booking ---
     def send_new_appointment_notification(
         self,
         *,
@@ -712,14 +712,14 @@ class WhatsAppService:
         appointment_id: Optional[str] = None,
         dedupe_key: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Notify the fixed clinic/admin WhatsApp number when an appointment is booked."""
+        """Notify the patient's registered WhatsApp number when an appointment is booked."""
         config = self._get_config()
         resolved_dedupe = (
             dedupe_key
             or f"new_appointment:{str(regno).strip().lower()}:{str(appointment_date).strip()}:{str(appointment_time).strip()}"
         )
         return self.send_template_message(
-            to_phone=config["admin_phone"],
+            to_phone=patient_phone,
             template_name=config["template_appointment"],
             parameters=[
                 patient_name,
@@ -734,7 +734,7 @@ class WhatsAppService:
             regno=str(regno).strip(),
             appointment_id=appointment_id,
             entity_id=appointment_id or f"{str(regno).strip()}:{appointment_date}:{appointment_time}",
-            missing_recipient_reason="Missing required WhatsApp configuration: WHATSAPP_ADMIN_PHONE",
+            missing_recipient_reason="Patient phone number not provided",
         )
 
     # --- Feature 3: Patient Notification for General Clinic Announcements ---
