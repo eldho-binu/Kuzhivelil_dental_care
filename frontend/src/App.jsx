@@ -620,6 +620,7 @@ function App() {
   
   const [apptPatient, setApptPatient] = useState(null); // NEW: For Appointment Modal
   const [apptData, setApptData] = useState({ date: '', time: '', doctor_name: '' });
+  const [apptModalError, setApptModalError] = useState(null);
   const [rescheduleAppt, setRescheduleAppt] = useState(null);
   const [rescheduleData, setRescheduleData] = useState({ date: '', time: '' });
 
@@ -839,12 +840,13 @@ function App() {
 
   const handleBookAppt = async () => {
     if (!apptPatient || !apptData.date || !apptData.time) {
-      setError("Please fill all fields");
+      setApptModalError("Please select both date and time");
       return;
     }
 
     try {
       setLoading(true);
+      setApptModalError(null);
       const result = await api.createAppointment({
         regno: apptPatient.regno,
         date: apptData.date,
@@ -855,13 +857,15 @@ function App() {
       if (result.success) {
         showSuccess("Appointment booked successfully!");
         setApptPatient(null);
+        setApptModalError(null);
         setApptData({ date: '', time: '', doctor_name: '' });
         if (currentView === 'appointments') loadAppointments();
         loadDashboardStats();
       } else {
-        setError(result.error || "Failed to book appointment");
+        setApptModalError(result.error || "Failed to book appointment");
       }
     } catch (err) {
+      setApptModalError(err.message || "Failed to book appointment");
       handleApiError(err);
     } finally {
       setLoading(false);
@@ -1771,7 +1775,10 @@ function App() {
                             <td className="px-6 py-4 whitespace-nowrap text-sm text-right">
                               <div className="flex justify-end space-x-1">
                                 <button
-                                  onClick={() => setApptPatient(patient)}
+                                  onClick={() => {
+                                    setApptPatient(patient);
+                                    setApptModalError(null);
+                                  }}
                                   className="inline-flex items-center p-2 text-cyan-600 hover:bg-cyan-50 transition-colors rounded-lg"
                                   title="Book Appointment"
                                 >
@@ -2294,7 +2301,13 @@ function App() {
         <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-2xl p-8 max-w-sm w-full shadow-2xl border border-slate-200">
             <h3 className="text-xl font-bold text-slate-900 mb-1">Book Appointment</h3>
-            <p className="text-slate-500 text-xs mb-6">Scheduling for: <span className="font-semibold text-cyan-700">{apptPatient.name}</span></p>
+            <p className="text-slate-500 text-xs mb-4">Scheduling for: <span className="font-semibold text-cyan-700">{apptPatient.name}</span></p>
+            {apptModalError && (
+              <div className="mb-4 p-3 bg-rose-50 border border-rose-200 text-rose-700 rounded-lg flex items-center text-xs">
+                <AlertCircle className="w-4 h-4 mr-2 flex-shrink-0" />
+                <span>{apptModalError}</span>
+              </div>
+            )}
             <div className="space-y-4">
               <div>
                 <label className="text-xs font-semibold text-slate-600 uppercase">Select Date</label>
@@ -2310,8 +2323,8 @@ function App() {
               </div>
             </div>
             <div className="flex gap-3 mt-8">
-              <button onClick={() => setApptPatient(null)} className="flex-1 py-2.5 font-medium text-slate-600 hover:bg-slate-100 rounded-xl text-sm transition-colors border border-slate-200">Cancel</button>
-              <button onClick={handleBookAppt} className="flex-1 py-2.5 font-semibold bg-cyan-600 text-white rounded-xl shadow-md hover:bg-cyan-700 text-sm transition-colors">Confirm</button>
+              <button onClick={() => { setApptPatient(null); setApptModalError(null); }} disabled={loading} className="flex-1 py-2.5 font-medium text-slate-600 hover:bg-slate-100 rounded-xl text-sm transition-colors border border-slate-200 disabled:opacity-50">Cancel</button>
+              <button onClick={handleBookAppt} disabled={loading} className="flex-1 py-2.5 font-semibold bg-cyan-600 text-white rounded-xl shadow-md hover:bg-cyan-700 text-sm transition-colors disabled:opacity-50">{loading ? 'Booking...' : 'Confirm'}</button>
             </div>
           </div>
         </div>

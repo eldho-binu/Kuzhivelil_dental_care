@@ -725,6 +725,48 @@ class WhatsAppIntegrationTestCase(unittest.TestCase):
             )
             self.assertEqual(res.status_code, 201)
 
+    @patch("services.whatsapp_service.requests.post")
+    def test_csv_patient_schema_with_int_phone_appointment_lifecycle(self, mock_post):
+        mock_post.return_value = self._mock_meta_success("wamid.csv.1")
+        self.fake_db["patients"].insert_one(
+            {
+                "Reg No": "A/001/25",
+                "Name": "SAJU AV",
+                "Phone": 919847584950,
+                "OP No": 1,
+            }
+        )
+
+        # Book appointment for CSV-schema patient
+        book_res = self.client.post(
+            "/api/appointments",
+            headers=self.auth_headers,
+            json={"regno": "A/001/25", "date": "2099-12-28", "time": "10:30"},
+        )
+        self.assertEqual(book_res.status_code, 200)
+        book_json = book_res.get_json()
+        self.assertTrue(book_json["success"])
+        appt_id = book_json["appointment_id"]
+
+        # GET appointments (and search) must resolve patient Name & int Phone cleanly
+        get_res = self.client.get("/api/appointments?search=SAJU", headers=self.auth_headers)
+        self.assertEqual(get_res.status_code, 200)
+        appts = get_res.get_json()["data"]
+        self.assertEqual(len(appts), 1)
+        self.assertEqual(appts[0]["patient_name"], "SAJU AV")
+        self.assertEqual(appts[0]["patient_phone"], "919847584950")
+
+        # Reminder scheduled cleanly with stringified phone
+        rem = self.fake_db["appointment_reminders"].find_one({"appointment_id": appt_id})
+        self.assertEqual(rem["status"], "pending")
+        self.assertEqual(rem["patient_phone"], "919847584950")
+
+        # Cancel appointment notifies patient's int phone cleanly
+        del_res = self.client.delete(f"/api/appointments/{appt_id}", headers=self.auth_headers)
+        self.assertEqual(del_res.status_code, 200)
+        self.assertEqual(mock_post.call_count, 2)
+        self.assertEqual(mock_post.call_args.kwargs["json"]["to"], "919847584950")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

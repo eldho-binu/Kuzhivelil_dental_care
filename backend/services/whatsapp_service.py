@@ -4,6 +4,7 @@ from datetime import datetime
 import hashlib
 import hmac
 import logging
+import math
 import os
 import re
 import threading
@@ -74,14 +75,22 @@ def _sanitize_template_param(value: Any) -> str:
 
 
 def normalize_phone_number(
-    raw_phone: Optional[str],
+    raw_phone: Optional[Any],
     default_country_code: str = DEFAULT_COUNTRY_CODE,
 ) -> Tuple[Optional[str], Optional[str]]:
     """Validate and normalize a phone number to E.164 digits (without leading '+')."""
-    if raw_phone is None or not str(raw_phone).strip():
+    if raw_phone is None:
         return None, "Recipient phone number is empty"
 
-    raw_str = str(raw_phone).strip()
+    if isinstance(raw_phone, float):
+        if math.isnan(raw_phone):
+            return None, "Recipient phone number is empty"
+        raw_str = str(int(raw_phone)) if raw_phone.is_integer() else str(raw_phone)
+    else:
+        raw_str = str(raw_phone).strip()
+
+    if not raw_str:
+        return None, "Recipient phone number is empty"
     if not re.fullmatch(r"[\d\s+\-().]+", raw_str):
         return None, "Recipient phone number contains invalid characters"
 

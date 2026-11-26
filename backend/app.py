@@ -17,6 +17,7 @@ import urllib.parse
 import requests
 from services.whatsapp_service import whatsapp_service
 from services.reminder_scheduler import (
+    IST,
     ReminderScheduler,
     cancel_reminder,
     format_date_readable,
@@ -223,6 +224,33 @@ def check_db_connection():
     except Exception:
         return False
 
+def _clean_field_str(value):
+    """Convert string/int/float MongoDB fields cleanly to string."""
+    if value is None:
+        return ''
+    if isinstance(value, float):
+        if math.isnan(value):
+            return ''
+        if value.is_integer():
+            return str(int(value))
+    return str(value).strip()
+
+
+def _extract_patient_fields(patient, fallback_regno=''):
+    """Extract canonical (regno, name, phone) from modern or CSV-imported patient docs."""
+    if not patient:
+        return fallback_regno, 'Unknown Patient', ''
+    regno_val = _clean_field_str(
+        patient.get('regno') if patient.get('regno') is not None else patient.get('Reg No')
+    ) or fallback_regno
+    name_val = _clean_field_str(
+        patient.get('name') if patient.get('name') is not None else patient.get('Name')
+    ) or 'Unknown Patient'
+    raw_phone = patient.get('phone') if patient.get('phone') is not None else patient.get('Phone')
+    phone_val = _clean_field_str(raw_phone)
+    return regno_val, name_val, phone_val
+
+
 # Helper functions
 def serialize_patient(patient):
     """Serialize patient document and handle field mapping from different sources"""
@@ -252,6 +280,14 @@ def serialize_patient(patient):
             patient[key] = None
         elif value is None:
             patient[key] = None
+
+    if patient.get('phone') is not None:
+        cleaned_phone = _clean_field_str(patient['phone'])
+        patient['phone'] = cleaned_phone or None
+
+    if patient.get('regno') is not None:
+        cleaned_regno = _clean_field_str(patient['regno'])
+        patient['regno'] = cleaned_regno or None
             
     # Ensure mandatory fields for frontend are at least present as empty/null
     for field in ['regno', 'name', 'phone', 'age', 'created_at']:
@@ -1048,7 +1084,7 @@ def create_appointment():
                 "error": "Patient not found"
             }), 404
 
-        canonical_regno = str(patient.get("regno") or patient.get("Reg No") or regno).strip()
+        canonical_regno, patient_name, patient_phone = _extract_patient_fields(patient, fallback_regno=regno)
 
         # Prevent duplicate booking & unintended duplicate WhatsApp notifications
         existing_appt = db['appointments'].find_one({
@@ -1075,8 +1111,6 @@ def create_appointment():
 
         insert_result = db['appointments'].insert_one(appointment_doc)
         appt_id_str = str(insert_result.inserted_id)
-        patient_name = patient.get("name") or patient.get("Name") or "N/A"
-        patient_phone = patient.get("phone") or patient.get("Phone") or ""
 
         # Feature 4: Persist 5-hour reminder job in MongoDB (Asia/Kolkata timezone)
         try:
@@ -1109,7 +1143,8 @@ def create_appointment():
 
         return jsonify({
             "success": True,
-            "message": "Appointment scheduled"
+            "message": "Appointment scheduled",
+            "appointment_id": appt_id_str,
         })
 
     except Exception as e:
@@ -1124,8 +1159,15 @@ def create_appointment():
 def get_appointments():
     """Get all appointments, auto-deleting past ones, and grouped by date"""
     try:
-        # Auto-delete past appointments (older than today)
-        today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        if not check_db_connection() or db is None:
+            return jsonify({
+                'success': False,
+                'error': 'Database connection failed'
+            }), 503
+
+        # Auto-delete past appointments (older than today in Asia/Kolkata)
+        ist_now = datetime.now(IST)
+        today_start = ist_now.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
         db['appointments'].delete_many({'datetime': {'$lt': today_start}})
 
         # Get query parameters
@@ -1134,16 +1176,22 @@ def get_appointments():
         # Build query
         query = {}
         if search:
-            # First find patients matching search
             matching_patients = list(patients_collection.find({
                 '$or': [
                     {'name': {'$regex': search, '$options': 'i'}},
+                    {'Name': {'$regex': search, '$options': 'i'}},
                     {'regno': {'$regex': search, '$options': 'i'}},
-                    {'phone': {'$regex': search, '$options': 'i'}}
+                    {'Reg No': {'$regex': search, '$options': 'i'}},
+                    {'phone': {'$regex': search, '$options': 'i'}},
+                    {'Phone': {'$regex': search, '$options': 'i'}}
                 ]
-            }, {'regno': 1}))
+            }, {'regno': 1, 'Reg No': 1}))
             
-            matching_regnos = [p['regno'] for p in matching_patients]
+            matching_regnos = [
+                _clean_field_str(p.get('regno') if p.get('regno') is not None else p.get('Reg No'))
+                for p in matching_patients
+            ]
+            matching_regnos = [r for r in matching_regnos if r]
             
             query = {
                 '$or': [
@@ -1160,11 +1208,12 @@ def get_appointments():
         for appt in appointments:
             appt['_id'] = str(appt['_id'])
             
-            # Find patient name
-            patient = patients_collection.find_one({'regno': appt['regno']}, {'name': 1, 'phone': 1})
+            # Find patient name across both modern and CSV schemas
+            patient = find_patient_by_regno(appt.get('regno', ''))
             if patient:
-                appt['patient_name'] = patient['name']
-                appt['patient_phone'] = patient.get('phone', 'N/A')
+                _, patient_name, patient_phone = _extract_patient_fields(patient, fallback_regno=appt.get('regno', ''))
+                appt['patient_name'] = patient_name
+                appt['patient_phone'] = patient_phone or 'N/A'
             else:
                 appt['patient_name'] = 'Unknown Patient'
                 appt['patient_phone'] = 'N/A'
@@ -1237,16 +1286,9 @@ def update_appointment(id):
                     f"appointment_reminder_5hrs:{id}:{old_date}:{old_time}"
                 )
 
-            regno = str(existing_appt.get('regno') or '').strip()
+            regno = _clean_field_str(existing_appt.get('regno'))
             patient = find_patient_by_regno(regno)
-            patient_name = (
-                (patient.get('name') or patient.get('Name'))
-                if patient else 'Patient'
-            )
-            patient_phone = (
-                (patient.get('phone') or patient.get('Phone'))
-                if patient else ''
-            )
+            _, patient_name, patient_phone = _extract_patient_fields(patient, fallback_regno=regno)
             schedule_or_update_reminder(
                 db,
                 appointment_id=id,
@@ -1310,8 +1352,7 @@ def delete_appointment(id):
         try:
             patient = find_patient_by_regno(regno)
             if patient and patient.get('whatsapp_opt_in', True) is not False:
-                patient_name = patient.get('name') or patient.get('Name') or 'Patient'
-                patient_phone = patient.get('phone') or patient.get('Phone') or ''
+                _, patient_name, patient_phone = _extract_patient_fields(patient, fallback_regno=regno)
                 whatsapp_service.send_appointment_cancelled_notification(
                     patient_name=patient_name,
                     regno=regno,

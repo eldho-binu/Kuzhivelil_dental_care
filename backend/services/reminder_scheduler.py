@@ -2,7 +2,9 @@
 
 from datetime import datetime, timedelta
 import logging
+import math
 import os
+import re
 import threading
 from typing import Any, Callable, Dict, Optional, Tuple
 
@@ -58,13 +60,35 @@ def compute_ist_appointment_times(
     return appt_utc, remind_at_utc
 
 
+def _clean_str(val: Any) -> str:
+    """Safely convert MongoDB/CSV field values (including int/Int64/float) to string."""
+    if val is None:
+        return ""
+    if isinstance(val, float):
+        if math.isnan(val):
+            return ""
+        if val.is_integer():
+            return str(int(val))
+    return str(val).strip()
+
+
 def _find_patient_for_regno(db: Any, regno: str) -> Optional[Dict[str, Any]]:
     if db is None or not regno:
         return None
     patients_col = db["patients"]
-    clean = str(regno).strip()
-    return patients_col.find_one(
+    clean = _clean_str(regno)
+    patient = patients_col.find_one(
         {"$or": [{"regno": clean}, {"Reg No": clean}]}
+    )
+    if patient:
+        return patient
+    return patients_col.find_one(
+        {
+            "$or": [
+                {"regno": {"$regex": f"^{re.escape(clean)}$", "$options": "i"}},
+                {"Reg No": {"$regex": f"^{re.escape(clean)}$", "$options": "i"}},
+            ]
+        }
     )
 
 
@@ -97,9 +121,9 @@ def schedule_or_update_reminder(
 
     doc_fields = {
         "appointment_id": str(appointment_id),
-        "regno": str(regno).strip(),
-        "patient_name": patient_name or "Patient",
-        "patient_phone": (patient_phone or "").strip(),
+        "regno": _clean_str(regno),
+        "patient_name": _clean_str(patient_name) or "Patient",
+        "patient_phone": _clean_str(patient_phone),
         "appointment_date": date_str.strip(),
         "appointment_time": time_str.strip(),
         "doctor_name": resolved_doctor,
@@ -292,13 +316,13 @@ def process_due_reminders(
             summary["skipped"] += 1
             continue
 
-        patient_name = (
+        patient_name = _clean_str(
             (patient.get("name") or patient.get("Name"))
             if patient
             else reminder.get("patient_name")
         ) or "Patient"
-        patient_phone = (
-            (patient.get("phone") or patient.get("Phone"))
+        patient_phone = _clean_str(
+            (patient.get("phone") if patient and patient.get("phone") is not None else (patient.get("Phone") if patient else None))
             if patient
             else reminder.get("patient_phone")
         )
