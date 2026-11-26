@@ -1695,14 +1695,14 @@ def get_dashboard_stats():
                 'latest_patients': []
             })
 
-        # Get current date info
-        now = datetime.now()
-        today_start = datetime(now.year, now.month, now.day)
-        month_start = datetime(now.year, now.month, 1)
+        # Get current date info in Asia/Kolkata
+        ist_now = datetime.now(IST).replace(tzinfo=None)
+        today_start = datetime(ist_now.year, ist_now.month, ist_now.day)
+        month_start = datetime(ist_now.year, ist_now.month, 1)
 
         # Get statistics
         total_patients = patients_collection.count_documents({})
-        
+
         # Today's date as string for string-based comparisons
         today_str = today_start.strftime('%Y-%m-%d')
         month_str = month_start.strftime('%Y-%m')
@@ -1715,7 +1715,7 @@ def get_dashboard_stats():
                 {'Date': {'$regex': f'^{today_str}'}}
             ]
         })
-        
+
         month_registrations = patients_collection.count_documents({
             '$or': [
                 {'created_at': {'$gte': month_start}},
@@ -1726,8 +1726,67 @@ def get_dashboard_stats():
         })
 
         today_appointments = db['appointments'].count_documents({
-            'datetime': {'$gte': today_start, '$lt': today_start + timedelta(days=1)}
+            '$or': [
+                {'date': today_str},
+                {'datetime': {'$gte': today_start, '$lt': today_start + timedelta(days=1)}}
+            ]
         })
+
+        upcoming_appointments_count = db['appointments'].count_documents({
+            'datetime': {'$gte': today_start}
+        })
+
+        # Next 5 upcoming appointments for dashboard card
+        upcoming_raw = list(
+            db['appointments']
+            .find({'datetime': {'$gte': today_start}})
+            .sort([('date', 1), ('time', 1)])
+            .limit(5)
+        )
+        next_appointments = []
+        for appt in upcoming_raw:
+            regno_val = _clean_field_str(appt.get('regno'))
+            patient = find_patient_by_regno(regno_val)
+            _, p_name, p_phone = _extract_patient_fields(patient, fallback_regno=regno_val)
+            next_appointments.append({
+                '_id': str(appt['_id']),
+                'regno': regno_val,
+                'patient_name': p_name,
+                'patient_phone': p_phone or 'N/A',
+                'date': appt.get('date', ''),
+                'time': appt.get('time', ''),
+                'doctor_name': appt.get('doctor_name') or '',
+            })
+
+        # Last 7 days registrations & appointments activity
+        last_7_days = []
+        for offset in range(6, -1, -1):
+            day_dt = today_start - timedelta(days=offset)
+            day_end = day_dt + timedelta(days=1)
+            day_str = day_dt.strftime('%Y-%m-%d')
+            reg_count = patients_collection.count_documents({
+                '$or': [
+                    {'created_at': {'$gte': day_dt, '$lt': day_end}},
+                    {'Date': {'$gte': day_dt, '$lt': day_end}},
+                    {'created_at': {'$regex': f'^{day_str}'}},
+                    {'Date': {'$regex': f'^{day_str}'}}
+                ]
+            })
+            appt_count = db['appointments'].count_documents({
+                '$or': [
+                    {'date': day_str},
+                    {'datetime': {'$gte': day_dt, '$lt': day_end}}
+                ]
+            })
+            last_7_days.append({
+                'date': day_str,
+                'day': day_dt.strftime('%a'),
+                'full_day': day_dt.strftime('%A'),
+                'label': day_dt.strftime('%d %b'),
+                'registrations': reg_count,
+                'appointments': appt_count,
+                'total': reg_count + appt_count,
+            })
 
         # Get latest 5 patients
         latest_patients = list(patients_collection.find()
@@ -1743,6 +1802,9 @@ def get_dashboard_stats():
             'today_registrations': today_registrations,
             'month_registrations': month_registrations,
             'today_appointments': today_appointments,
+            'upcoming_appointments_count': upcoming_appointments_count,
+            'next_appointments': next_appointments,
+            'last_7_days': last_7_days,
             'latest_patients': serialized_latest
         })
 

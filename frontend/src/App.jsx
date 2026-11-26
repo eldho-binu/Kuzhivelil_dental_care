@@ -20,7 +20,10 @@ import {
   Megaphone,
   Send,
   ChevronDown,
-  ChevronRight
+  ChevronRight,
+  Bell,
+  ArrowRight,
+  Clock
 } from 'lucide-react';
 import clinicLogo from './assets/Logo.png';
 
@@ -617,6 +620,7 @@ function App() {
   const [totalCount, setTotalCount] = useState(0);
   const [appointments, setAppointments] = useState([]); // NEW: For Appointment Tracking
   const [expandedApptDates, setExpandedApptDates] = useState({});
+  const [chartMetric, setChartMetric] = useState('total');
   const [searchQuery, setSearchQuery] = useState('');
   const [searchMode, setSearchMode] = useState(false);
     // Modals / Selection
@@ -857,6 +861,53 @@ function App() {
     });
     return Object.entries(groups).sort(([a], [b]) => a.localeCompare(b));
   }, [appointments]);
+
+  const formatAppointmentDateWithDay = (dateStr) => {
+    if (!dateStr) return 'N/A';
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateStr).trim());
+    if (!match) return dateStr;
+    const year = Number(match[1]);
+    const month = Number(match[2]) - 1;
+    const day = Number(match[3]);
+    const dt = new Date(year, month, day);
+    if (Number.isNaN(dt.getTime())) return dateStr;
+    const weekday = dt.toLocaleDateString('en-US', { weekday: 'long' });
+    const formatted = dt.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+    return `${weekday}, ${formatted}`;
+  };
+
+  const formatAppointmentTime12h = (timeStr) => {
+    if (!timeStr) return 'N/A';
+    const match = /^(\d{1,2}):(\d{2})$/.exec(String(timeStr).trim());
+    if (!match) return timeStr;
+    let h = Number(match[1]);
+    const m = match[2];
+    const ampm = h >= 12 ? 'PM' : 'AM';
+    h = h % 12 || 12;
+    return `${String(h).padStart(2, '0')}:${m} ${ampm}`;
+  };
+
+  const getGreetingText = () => {
+    const hour = new Date().getHours();
+    if (hour < 12) return 'Good morning';
+    if (hour < 17) return 'Good afternoon';
+    return 'Good evening';
+  };
+
+  const getTodayFullDate = () =>
+    new Date().toLocaleDateString('en-GB', {
+      weekday: 'long',
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric'
+    });
+
+  const getInitials = (name) => {
+    const parts = String(name || 'P').trim().split(/\s+/).filter(Boolean);
+    if (parts.length === 0) return 'P';
+    if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+    return `${parts[0][0]}${parts[1][0]}`.toUpperCase();
+  };
 
   const handleBookAppt = async () => {
     if (!apptPatient || !apptData.date || !apptData.time) {
@@ -1298,138 +1349,179 @@ function App() {
   }
 
   // Main app interface
+  const last7Days = stats.last_7_days || [];
+  const maxChartValue = Math.max(
+    1,
+    ...last7Days.map((d) => Number(d[chartMetric] || 0))
+  );
+  const totalChartCount = last7Days.reduce(
+    (sum, d) => sum + Number(d[chartMetric] || 0),
+    0
+  );
+  const peakDay = last7Days.reduce(
+    (best, d) =>
+      Number(d[chartMetric] || 0) >= Number(best[chartMetric] || 0) ? d : best,
+    last7Days[0] || { full_day: 'Today', [chartMetric]: 0 }
+  );
+
   return (
-    <div className="min-h-screen bg-slate-50 flex text-slate-900">
+    <div className="min-h-screen bg-[#f6f8f7] flex text-slate-900">
       {/* Sidebar */}
-      <div className={`${sidebarOpen ? 'translate-x-0' : '-translate-x-full'} fixed inset-y-0 left-0 z-50 w-64 bg-white text-slate-800 shadow-xl border-r border-slate-200/80 transform transition-transform duration-300 ease-in-out lg:translate-x-0 lg:static lg:inset-0`}>
-        <div className="flex items-center justify-start h-16 px-5 bg-white border-b border-slate-200">
-          <div className="w-8 h-8 mr-3 flex items-center justify-center">
-            <img 
-              src={clinicLogo} 
-              alt="Kuzhivelil Dental Care Logo" 
-              className="w-full h-full object-contain"
-              onError={(e) => {
-                e.target.style.display = 'none';
-                e.target.nextSibling.style.display = 'block';
-              }}
-            />
-            <ToothIcon className="w-8 h-8 text-cyan-600 hidden" />
+      <div className={`${sidebarOpen ? 'translate-x-0' : '-translate-x-full'} fixed inset-y-0 left-0 z-50 w-64 bg-white text-slate-800 border-r border-slate-200/80 transform transition-transform duration-300 ease-in-out lg:translate-x-0 lg:static lg:inset-0 flex flex-col justify-between`}>
+        <div>
+          <div className="flex items-center justify-start h-16 px-5 bg-white border-b border-slate-100">
+            <div className="w-9 h-9 mr-3 rounded-xl bg-emerald-50 border border-emerald-100 p-1.5 flex items-center justify-center flex-shrink-0">
+              <img 
+                src={clinicLogo} 
+                alt="Kuzhivelil Dental Care Logo" 
+                className="w-full h-full object-contain"
+                onError={(e) => {
+                  e.target.style.display = 'none';
+                  e.target.nextSibling.style.display = 'block';
+                }}
+              />
+              <ToothIcon className="w-6 h-6 text-emerald-600 hidden" />
+            </div>
+            <div className="flex flex-col overflow-hidden">
+              <h1 className="text-slate-900 text-sm font-bold truncate">Kuzhivelil Dental</h1>
+              <span className="text-[11px] text-slate-400 font-medium">Clinic Management</span>
+            </div>
           </div>
-          <div className="flex flex-col">
-            <h1 className="text-slate-900 text-base font-bold">Kuzhivelil Dental Care</h1>
-          </div>
+
+          <nav className="mt-5 px-3">
+            <p className="px-3 mb-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+              Workspace
+            </p>
+            <div className="space-y-1">
+              <button
+                onClick={() => {
+                  setCurrentView('dashboard');
+                  loadDashboardStats();
+                  setSidebarOpen(false);
+                }}
+                className={`w-full flex items-center justify-between px-3.5 py-2.5 text-left rounded-xl text-sm transition-all ${currentView === 'dashboard'
+                  ? 'bg-emerald-100/80 text-emerald-950 font-semibold shadow-xs'
+                  : 'text-slate-600 hover:bg-slate-100/80 hover:text-slate-900 font-medium'
+                  }`}
+              >
+                <span className="flex items-center">
+                  <Home className={`w-4 h-4 mr-3 flex-shrink-0 ${currentView === 'dashboard' ? 'text-emerald-700' : 'text-slate-400'}`} />
+                  Dashboard
+                </span>
+              </button>
+
+              <button
+                onClick={() => {
+                  setCurrentView('appointments');
+                  loadAppointments();
+                  setSidebarOpen(false);
+                }}
+                className={`w-full flex items-center justify-between px-3.5 py-2.5 text-left rounded-xl text-sm transition-all ${currentView === 'appointments'
+                  ? 'bg-emerald-100/80 text-emerald-950 font-semibold shadow-xs'
+                  : 'text-slate-600 hover:bg-slate-100/80 hover:text-slate-900 font-medium'
+                  }`}
+              >
+                <span className="flex items-center">
+                  <Calendar className={`w-4 h-4 mr-3 flex-shrink-0 ${currentView === 'appointments' ? 'text-emerald-700' : 'text-slate-400'}`} />
+                  Appointments
+                </span>
+                {(stats.upcoming_appointments_count || 0) > 0 && (
+                  <span className="px-2 py-0.5 text-[11px] font-bold rounded-full bg-emerald-100 text-emerald-800">
+                    {stats.upcoming_appointments_count}
+                  </span>
+                )}
+              </button>
+
+              <button
+                onClick={() => {
+                  setCurrentView('current');
+                  setSidebarOpen(false);
+                }}
+                className={`w-full flex items-center justify-between px-3.5 py-2.5 text-left rounded-xl text-sm transition-all ${currentView === 'current'
+                  ? 'bg-emerald-100/80 text-emerald-950 font-semibold shadow-xs'
+                  : 'text-slate-600 hover:bg-slate-100/80 hover:text-slate-900 font-medium'
+                  }`}
+              >
+                <span className="flex items-center">
+                  <Users className={`w-4 h-4 mr-3 flex-shrink-0 ${currentView === 'current' ? 'text-emerald-700' : 'text-slate-400'}`} />
+                  Patients
+                </span>
+                {(stats.total_patients || 0) > 0 && (
+                  <span className="px-2 py-0.5 text-[11px] font-semibold rounded-full bg-slate-100 text-slate-600">
+                    {stats.total_patients}
+                  </span>
+                )}
+              </button>
+
+              <button
+                onClick={() => {
+                  setCurrentView('new');
+                  setFormData({ regno: '', name: '', address: '', phone: '', age: '', whatsapp_opt_in: true });
+                  setError(null);
+                  setSidebarOpen(false);
+                }}
+                className={`w-full flex items-center px-3.5 py-2.5 text-left rounded-xl text-sm transition-all ${currentView === 'new'
+                  ? 'bg-emerald-100/80 text-emerald-950 font-semibold shadow-xs'
+                  : 'text-slate-600 hover:bg-slate-100/80 hover:text-slate-900 font-medium'
+                  }`}
+              >
+                <Plus className={`w-4 h-4 mr-3 flex-shrink-0 ${currentView === 'new' ? 'text-emerald-700' : 'text-slate-400'}`} />
+                New Registration
+              </button>
+
+              <button
+                onClick={() => {
+                  setCurrentView('announcements');
+                  loadAnnouncements();
+                  setSidebarOpen(false);
+                }}
+                className={`w-full flex items-center px-3.5 py-2.5 text-left rounded-xl text-sm transition-all ${currentView === 'announcements'
+                  ? 'bg-emerald-100/80 text-emerald-950 font-semibold shadow-xs'
+                  : 'text-slate-600 hover:bg-slate-100/80 hover:text-slate-900 font-medium'
+                  }`}
+              >
+                <Megaphone className={`w-4 h-4 mr-3 flex-shrink-0 ${currentView === 'announcements' ? 'text-emerald-700' : 'text-slate-400'}`} />
+                Announcements
+              </button>
+
+              <button
+                onClick={handleExportCSV}
+                disabled={loading}
+                className="w-full flex items-center px-3.5 py-2.5 text-left rounded-xl text-sm text-slate-600 hover:bg-slate-100/80 hover:text-slate-900 transition-all font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Download className="w-4 h-4 mr-3 flex-shrink-0 text-slate-400" />
+                {loading ? 'Exporting...' : 'Export as CSV'}
+              </button>
+            </div>
+          </nav>
         </div>
 
-        <nav className="mt-6">
-          <div className="px-3 space-y-1.5">
-            <button
-              onClick={() => {
-                setCurrentView('dashboard');
-                setSidebarOpen(false);
-              }}
-              className={`w-full flex items-center px-4 py-3 text-left rounded-lg text-sm transition-all ${currentView === 'dashboard'
-                ? 'bg-cyan-50 text-cyan-700 font-bold border-l-4 border-cyan-600 shadow-xs'
-                : 'text-slate-600 hover:bg-slate-100/80 hover:text-slate-900 font-medium'
-                }`}
-            >
-              <Home className="w-5 h-5 mr-3 flex-shrink-0" />
-              Dashboard
-            </button>
-
-            <button
-              onClick={() => {
-                setCurrentView('new');
-                setFormData({ regno: '', name: '', address: '', phone: '', age: '', whatsapp_opt_in: true });
-                setError(null);
-                setSidebarOpen(false);
-              }}
-              className={`w-full flex items-center px-4 py-3 text-left rounded-lg text-sm transition-all ${currentView === 'new'
-                ? 'bg-cyan-50 text-cyan-700 font-bold border-l-4 border-cyan-600 shadow-xs'
-                : 'text-slate-600 hover:bg-slate-100/80 hover:text-slate-900 font-medium'
-                }`}
-            >
-              <Plus className="w-5 h-5 mr-3 flex-shrink-0" />
-              New Registration
-            </button>
-
-            <button
-              onClick={() => {
-                setCurrentView('current');
-                setSidebarOpen(false);
-              }}
-              className={`w-full flex items-center px-4 py-3 text-left rounded-lg text-sm transition-all ${currentView === 'current'
-                ? 'bg-cyan-50 text-cyan-700 font-bold border-l-4 border-cyan-600 shadow-xs'
-                : 'text-slate-600 hover:bg-slate-100/80 hover:text-slate-900 font-medium'
-                }`}
-            >
-              <Users className="w-5 h-5 mr-3 flex-shrink-0" />
-              Patient Records
-            </button>
-
-            <button
-              onClick={() => {
-                setCurrentView('appointments');
-                loadAppointments();
-                setSidebarOpen(false);
-              }}
-              className={`w-full flex items-center px-4 py-3 text-left rounded-lg text-sm transition-all ${currentView === 'appointments'
-                ? 'bg-cyan-50 text-cyan-700 font-bold border-l-4 border-cyan-600 shadow-xs'
-                : 'text-slate-600 hover:bg-slate-100/80 hover:text-slate-900 font-medium'
-                }`}
-            >
-              <Calendar className="w-5 h-5 mr-3 flex-shrink-0" />
-              Appointments
-            </button>
-
-            <button
-              onClick={() => {
-                setCurrentView('announcements');
-                loadAnnouncements();
-                setSidebarOpen(false);
-              }}
-              className={`w-full flex items-center px-4 py-3 text-left rounded-lg text-sm transition-all ${currentView === 'announcements'
-                ? 'bg-cyan-50 text-cyan-700 font-bold border-l-4 border-cyan-600 shadow-xs'
-                : 'text-slate-600 hover:bg-slate-100/80 hover:text-slate-900 font-medium'
-                }`}
-            >
-              <Megaphone className="w-5 h-5 mr-3 flex-shrink-0" />
-              Announcements
-            </button>
-
-            {/* Export CSV button */}
-            <button
-              onClick={handleExportCSV}
-              disabled={loading}
-              className="w-full flex items-center px-4 py-3 text-left rounded-lg text-sm text-slate-600 hover:bg-slate-100/80 hover:text-slate-900 transition-all font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <Download className="w-5 h-5 mr-3 flex-shrink-0" />
-              {loading ? 'Exporting...' : 'Export as CSV'}
-            </button>
+        {/* User Profile & Clinic Open Status */}
+        <div className="p-4 border-t border-slate-100 bg-white space-y-3">
+          <div className="flex items-center px-3 py-2 rounded-xl bg-emerald-50/70 border border-emerald-100">
+            <span className="w-2 h-2 rounded-full bg-emerald-500 mr-2.5 animate-pulse" />
+            <span className="text-xs font-semibold text-emerald-900">Clinic is open</span>
           </div>
-        </nav>
-
-        {/* User Profile Section */}
-        <div className="absolute bottom-0 left-0 right-0 p-4 border-t border-slate-200 bg-slate-50/80">
-          <div className="flex items-center mb-3">
-            <div className="w-8 h-8 bg-cyan-100 flex items-center justify-center rounded-lg text-cyan-700">
+          <div className="flex items-center px-1">
+            <div className="w-8 h-8 bg-emerald-100 flex items-center justify-center rounded-lg text-emerald-700">
               <User className="w-4 h-4" />
             </div>
             <div className="ml-3 overflow-hidden">
               <p className="text-sm font-semibold text-slate-900 truncate">{currentUser?.username}</p>
-              <p className="text-xs text-slate-500">Administrator</p>
+              <p className="text-xs text-slate-400">Administrator</p>
             </div>
           </div>
           <div className="space-y-1">
             <button
               onClick={() => setShowChangePassword(true)}
-              className="w-full flex items-center px-3 py-2 text-xs font-medium text-slate-600 hover:bg-slate-200/60 hover:text-slate-900 rounded-md transition-colors"
+              className="w-full flex items-center px-3 py-2 text-xs font-medium text-slate-600 hover:bg-slate-100 hover:text-slate-900 rounded-lg transition-colors"
             >
               <Lock className="w-3.5 h-3.5 mr-2" />
               Change Password
             </button>
             <button
               onClick={handleLogout}
-              className="w-full flex items-center px-3 py-2 text-xs font-medium text-rose-600 hover:bg-rose-50 hover:text-rose-700 rounded-md transition-colors"
+              className="w-full flex items-center px-3 py-2 text-xs font-medium text-rose-600 hover:bg-rose-50 hover:text-rose-700 rounded-lg transition-colors"
             >
               <LogOut className="w-3.5 h-3.5 mr-2" />
               Sign Out
@@ -1500,83 +1592,265 @@ function App() {
         </div>
 
         {/* Main Content Area */}
-        <main className="flex-1 overflow-x-hidden overflow-y-auto bg-slate-50/70 px-6 py-6">
+        <main className="flex-1 overflow-x-hidden overflow-y-auto bg-[#f6f8f7] px-6 py-6">
           
           {/* Dashboard View */}
           {currentView === 'dashboard' && (
-            <div className="space-y-6">
-              <h2 className="text-2xl font-bold text-slate-900 tracking-tight">Dashboard Overview</h2>
+            <div className="space-y-5 max-w-7xl mx-auto">
+              {/* Top Greeting & Quick Actions */}
+              <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+                <div>
+                  <h2 className="text-2xl md:text-3xl font-bold text-slate-900 tracking-tight">
+                    {getGreetingText()}, {currentUser?.username || 'Admin'}
+                  </h2>
+                  <p className="text-sm text-slate-500 mt-0.5">{getTodayFullDate()}</p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <button
+                    onClick={() => { setCurrentView('appointments'); loadAppointments(); }}
+                    className="inline-flex items-center px-3.5 py-2 bg-white border border-slate-200 rounded-xl text-xs font-semibold text-slate-700 hover:bg-slate-50 shadow-xs transition-colors"
+                  >
+                    <Calendar className="w-3.5 h-3.5 mr-1.5 text-emerald-600" />
+                    Appointments
+                  </button>
+                  <button
+                    onClick={() => setCurrentView('current')}
+                    className="inline-flex items-center px-3.5 py-2 bg-white border border-slate-200 rounded-xl text-xs font-semibold text-slate-700 hover:bg-slate-50 shadow-xs transition-colors"
+                  >
+                    <Users className="w-3.5 h-3.5 mr-1.5 text-emerald-600" />
+                    Patient Records
+                  </button>
+                  <button
+                    onClick={() => {
+                      setCurrentView('new');
+                      setFormData({ regno: '', name: '', address: '', phone: '', age: '', whatsapp_opt_in: true });
+                      setError(null);
+                    }}
+                    className="inline-flex items-center px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-semibold shadow-xs transition-colors"
+                  >
+                    <Plus className="w-3.5 h-3.5 mr-1.5" />
+                    New Registration
+                  </button>
+                </div>
+              </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-                <div className="bg-white shadow-xs p-6 border border-slate-200/80 rounded-xl hover:shadow-md transition-shadow">
-                  <div className="flex items-center justify-between">
+              {/* Alert Banner */}
+              <div className="bg-amber-50/90 border border-amber-200/80 rounded-2xl px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                <div className="flex items-center text-sm text-slate-800">
+                  <Bell className="w-4 h-4 text-amber-600 mr-2.5 flex-shrink-0" />
+                  <span>
+                    {(stats.today_appointments || 0) > 0
+                      ? `${stats.today_appointments} appointment(s) scheduled for today — automated 5-hour WhatsApp reminders are active.`
+                      : `${stats.upcoming_appointments_count || 0} upcoming appointment(s) scheduled. Send patient updates anytime via Announcements.`}
+                  </span>
+                </div>
+                <button
+                  onClick={() => { setCurrentView('announcements'); loadAnnouncements(); }}
+                  className="inline-flex items-center justify-center px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-xl transition-colors whitespace-nowrap"
+                >
+                  Send announcement
+                  <ArrowRight className="w-3.5 h-3.5 ml-1.5" />
+                </button>
+              </div>
+
+              {/* 4 KPI Cards */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                <div
+                  onClick={() => { setCurrentView('appointments'); loadAppointments(); }}
+                  className="bg-white p-5 border border-slate-200/80 rounded-2xl shadow-xs hover:shadow-md transition-all cursor-pointer"
+                >
+                  <div className="flex items-center justify-between mb-3">
+                    <span className="text-xs font-semibold text-slate-500">Today&apos;s Appointments</span>
+                    <span className="w-8 h-8 rounded-lg bg-emerald-50 flex items-center justify-center text-emerald-600">
+                      <Calendar className="w-4 h-4" />
+                    </span>
+                  </div>
+                  <p className="text-3xl font-bold text-slate-900">{stats.today_appointments || 0}</p>
+                  <p className="text-xs text-emerald-700 font-medium mt-1.5">
+                    {stats.upcoming_appointments_count || 0} total upcoming
+                  </p>
+                </div>
+
+                <div className="bg-white p-5 border border-slate-200/80 rounded-2xl shadow-xs hover:shadow-md transition-all">
+                  <div className="flex items-center justify-between mb-3">
+                    <span className="text-xs font-semibold text-slate-500">New Patients Today</span>
+                    <span className="w-8 h-8 rounded-lg bg-emerald-50 flex items-center justify-center text-emerald-600">
+                      <User className="w-4 h-4" />
+                    </span>
+                  </div>
+                  <p className="text-3xl font-bold text-slate-900">{stats.today_registrations || 0}</p>
+                  <p className="text-xs text-slate-500 mt-1.5">First visits today</p>
+                </div>
+
+                <div className="bg-white p-5 border border-slate-200/80 rounded-2xl shadow-xs hover:shadow-md transition-all">
+                  <div className="flex items-center justify-between mb-3">
+                    <span className="text-xs font-semibold text-slate-500">This Month</span>
+                    <span className="w-8 h-8 rounded-lg bg-emerald-50 flex items-center justify-center text-emerald-600">
+                      <Activity className="w-4 h-4" />
+                    </span>
+                  </div>
+                  <p className="text-3xl font-bold text-slate-900">{stats.month_registrations || 0}</p>
+                  <p className="text-xs text-slate-500 mt-1.5">Registrations this month</p>
+                </div>
+
+                <div
+                  onClick={() => setCurrentView('current')}
+                  className="bg-white p-5 border border-slate-200/80 rounded-2xl shadow-xs hover:shadow-md transition-all cursor-pointer"
+                >
+                  <div className="flex items-center justify-between mb-3">
+                    <span className="text-xs font-semibold text-slate-500">Total Patients</span>
+                    <span className="w-8 h-8 rounded-lg bg-emerald-50 flex items-center justify-center text-emerald-600">
+                      <Users className="w-4 h-4" />
+                    </span>
+                  </div>
+                  <p className="text-3xl font-bold text-slate-900">{stats.total_patients || 0}</p>
+                  <p className="text-xs text-slate-500 mt-1.5 truncate">
+                    Latest: {getLatestRegno()}
+                  </p>
+                </div>
+              </div>
+
+              {/* Analytics + Next Appointments Grid */}
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
+                {/* 7-Day Activity Bar Chart */}
+                <div className="lg:col-span-7 bg-white p-6 border border-slate-200/80 rounded-2xl shadow-xs flex flex-col justify-between">
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
                     <div>
-                      <p className="text-sm font-medium text-slate-500">Total Patients</p>
-                      <p className="text-3xl font-bold text-slate-900 mt-2">{stats.total_patients || 0}</p>
+                      <h3 className="text-base font-bold text-slate-900">Activity - last 7 days</h3>
+                      <p className="text-xs text-slate-500 mt-0.5">
+                        {last7Days.length > 0
+                          ? `${last7Days[0].label} – ${last7Days[last7Days.length - 1].label} · ${totalChartCount} total`
+                          : 'Last 7 days overview'}
+                      </p>
                     </div>
-                    <div className="w-12 h-12 bg-cyan-50 flex items-center justify-center rounded-xl text-cyan-600">
-                      <Users className="w-6 h-6" />
+                    <div className="inline-flex bg-slate-100 p-1 rounded-xl self-start">
+                      {[
+                        { key: 'total', label: 'All' },
+                        { key: 'registrations', label: 'Patients' },
+                        { key: 'appointments', label: 'Appts' }
+                      ].map((tab) => (
+                        <button
+                          key={tab.key}
+                          onClick={() => setChartMetric(tab.key)}
+                          className={`px-3 py-1 rounded-lg text-xs font-semibold transition-all ${
+                            chartMetric === tab.key
+                              ? 'bg-white text-slate-900 shadow-xs'
+                              : 'text-slate-500 hover:text-slate-800'
+                          }`}
+                        >
+                          {tab.label}
+                        </button>
+                      ))}
                     </div>
+                  </div>
+
+                  <div className="h-48 flex items-end justify-between gap-2 sm:gap-4 pt-4 pb-2 border-b border-slate-100">
+                    {last7Days.length > 0 ? (
+                      last7Days.map((dayItem, idx) => {
+                        const val = Number(dayItem[chartMetric] || 0);
+                        const pct = Math.max(8, Math.round((val / maxChartValue) * 100));
+                        const isPeakOrToday = idx === last7Days.length - 1 || (val > 0 && val === maxChartValue);
+                        return (
+                          <div key={dayItem.date} className="flex-1 flex flex-col items-center h-full justify-end group">
+                            <span className="text-[11px] font-semibold text-slate-600 mb-1.5">{val}</span>
+                            <div className="w-full max-w-[36px] flex items-end h-32 bg-slate-50 rounded-t-lg overflow-hidden">
+                              <div
+                                style={{ height: `${val === 0 ? 6 : pct}%` }}
+                                className={`w-full rounded-t-lg transition-all duration-300 ${
+                                  isPeakOrToday ? 'bg-emerald-500' : 'bg-emerald-200/80 group-hover:bg-emerald-300'
+                                }`}
+                                title={`${dayItem.full_day} (${dayItem.label}): ${val}`}
+                              />
+                            </div>
+                            <span className={`text-xs mt-2 font-medium ${idx === last7Days.length - 1 ? 'text-emerald-700 font-bold' : 'text-slate-500'}`}>
+                              {dayItem.day}
+                            </span>
+                          </div>
+                        );
+                      })
+                    ) : (
+                      <div className="w-full text-center text-sm text-slate-400 self-center">Loading 7-day activity...</div>
+                    )}
+                  </div>
+
+                  <div className="flex items-center justify-between pt-3 text-xs text-slate-500">
+                    <span className="flex items-center">
+                      <span className="w-2 h-2 rounded-full bg-emerald-500 mr-2" />
+                      {chartMetric === 'total' ? 'Registrations & appointments' : chartMetric === 'registrations' ? 'New patient registrations' : 'Scheduled appointments'}
+                    </span>
+                    <span className="font-medium text-slate-700">
+                      Peak: {peakDay.full_day} ({peakDay[chartMetric] || 0})
+                    </span>
                   </div>
                 </div>
 
-                <div className="bg-white shadow-xs p-6 border border-slate-200/80 rounded-xl hover:shadow-md transition-shadow">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-medium text-slate-500">Today's Registrations</p>
-                      <p className="text-3xl font-bold text-slate-900 mt-2">{stats.today_registrations || 0}</p>
-                    </div>
-                    <div className="w-12 h-12 bg-blue-50 flex items-center justify-center rounded-xl text-blue-600">
-                      <Calendar className="w-6 h-6" />
-                    </div>
-                  </div>
-                </div>
-
-                <div className="bg-white shadow-xs p-6 border border-slate-200/80 rounded-xl hover:shadow-md transition-shadow">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-medium text-slate-500">This Month</p>
-                      <p className="text-3xl font-bold text-slate-900 mt-2">{stats.month_registrations || 0}</p>
-                    </div>
-                    <div className="w-12 h-12 bg-indigo-50 flex items-center justify-center rounded-xl text-indigo-600">
-                      <Activity className="w-6 h-6" />
-                    </div>
-                  </div>
-                </div>
-
-                <div className="bg-white shadow-xs p-6 border border-slate-200/80 rounded-xl cursor-pointer hover:bg-slate-50 transition-all border-l-4 border-l-cyan-600" onClick={() => { setCurrentView('appointments'); loadAppointments(); }}>
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-medium text-slate-500">Today's Appointments</p>
-                      <p className="text-3xl font-bold text-cyan-700 mt-2">{stats.today_appointments || 0}</p>
-                    </div>
-                    <div className="w-12 h-12 bg-cyan-50 flex items-center justify-center rounded-xl text-cyan-600">
-                      <Calendar className="w-6 h-6" />
-                    </div>
-                  </div>
-                </div>
-
-                <div className="bg-white shadow-xs p-6 border border-slate-200/80 rounded-xl">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-medium text-slate-500">Latest Registration</p>
-                      <p className="text-xl font-bold text-slate-900 mt-1">{getLatestRegno()}</p>
-                      {getLatestPatient() && (
-                        <p className="text-xs text-slate-500 mt-1 truncate">
-                          {getLatestPatient().name} - {formatDate(getLatestPatient().date || getLatestPatient().created_at)}
+                {/* Next Upcoming Appointments Card */}
+                <div className="lg:col-span-5 bg-white p-6 border border-slate-200/80 rounded-2xl shadow-xs flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center justify-between mb-4">
+                      <div>
+                        <h3 className="text-base font-bold text-slate-900">Next appointments</h3>
+                        <p className="text-xs text-slate-500 mt-0.5">
+                          {stats.upcoming_appointments_count || 0} upcoming
                         </p>
-                      )}
+                      </div>
+                      <button
+                        onClick={() => { setCurrentView('appointments'); loadAppointments(); }}
+                        className="text-xs font-semibold text-emerald-700 hover:text-emerald-800 inline-flex items-center"
+                      >
+                        View all
+                        <ArrowRight className="w-3.5 h-3.5 ml-1" />
+                      </button>
                     </div>
-                    <div className="w-12 h-12 bg-sky-50 flex items-center justify-center rounded-xl text-sky-600">
-                      <Plus className="w-6 h-6" />
+
+                    <div className="divide-y divide-slate-100">
+                      {(stats.next_appointments && stats.next_appointments.length > 0) ? (
+                        stats.next_appointments.map((appt) => (
+                          <div key={appt._id} className="py-3 flex items-center justify-between gap-3">
+                            <div className="flex items-center min-w-0">
+                              <div className="w-9 h-9 rounded-full bg-emerald-50 border border-emerald-100 text-emerald-700 font-bold text-xs flex items-center justify-center flex-shrink-0 mr-3">
+                                {getInitials(appt.patient_name)}
+                              </div>
+                              <div className="min-w-0">
+                                <p className="text-sm font-semibold text-slate-900 truncate">{appt.patient_name}</p>
+                                <p className="text-xs text-slate-500 truncate">
+                                  {formatAppointmentDateWithDay(appt.date)}
+                                  {appt.doctor_name ? ` · ${appt.doctor_name}` : ''}
+                                </p>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-2 flex-shrink-0">
+                              <span className="text-xs font-semibold text-slate-700 inline-flex items-center">
+                                <Clock className="w-3 h-3 mr-1 text-slate-400" />
+                                {formatAppointmentTime12h(appt.time)}
+                              </span>
+                              <span className="px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-sky-50 text-sky-700">
+                                Scheduled
+                              </span>
+                            </div>
+                          </div>
+                        ))
+                      ) : (
+                        <div className="py-10 text-center text-slate-400 text-sm">
+                          No upcoming appointments scheduled.
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>
               </div>
 
-              <div className="bg-white shadow-xs border border-slate-200/80 rounded-xl overflow-hidden">
-                <div className="px-6 py-4 border-b border-slate-200/80 bg-white">
-                  <h3 className="text-lg font-bold text-slate-900">Recent Patients</h3>
+              {/* Recent Patients Table */}
+              <div className="bg-white shadow-xs border border-slate-200/80 rounded-2xl overflow-hidden">
+                <div className="px-6 py-4 border-b border-slate-100 bg-white flex items-center justify-between">
+                  <h3 className="text-base font-bold text-slate-900">Recent Patients</h3>
+                  <button
+                    onClick={() => setCurrentView('current')}
+                    className="text-xs font-semibold text-emerald-700 hover:text-emerald-800 inline-flex items-center"
+                  >
+                    See all records
+                    <ArrowRight className="w-3.5 h-3.5 ml-1" />
+                  </button>
                 </div>
                 <div className="overflow-x-auto">
                   <table className="w-full">
@@ -1964,23 +2238,23 @@ function App() {
                               {hasMultiple && (
                                 <tr
                                   onClick={() => toggleAppointmentDate(dateKey)}
-                                  className="bg-cyan-50/60 hover:bg-cyan-50 cursor-pointer transition-colors"
+                                  className="bg-emerald-50/60 hover:bg-emerald-50 cursor-pointer transition-colors"
                                 >
                                   <td colSpan="5" className="px-6 py-3.5 text-xs">
                                     <div className="flex items-center justify-between">
                                       <div className="flex items-center space-x-2.5">
                                         {isExpanded ? (
-                                          <ChevronDown className="w-4 h-4 text-cyan-700" />
+                                          <ChevronDown className="w-4 h-4 text-emerald-700" />
                                         ) : (
-                                          <ChevronRight className="w-4 h-4 text-cyan-700" />
+                                          <ChevronRight className="w-4 h-4 text-emerald-700" />
                                         )}
-                                        <Calendar className="w-4 h-4 text-cyan-600" />
-                                        <span className="font-bold text-slate-900 text-sm">{dateKey}</span>
-                                        <span className="px-2.5 py-0.5 rounded-full bg-cyan-100 text-cyan-800 font-semibold text-xs">
+                                        <Calendar className="w-4 h-4 text-emerald-600" />
+                                        <span className="font-bold text-slate-900 text-sm">{formatAppointmentDateWithDay(dateKey)}</span>
+                                        <span className="px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-semibold text-xs">
                                           {dayAppts.length} Appointments
                                         </span>
                                       </div>
-                                      <span className="text-xs font-medium text-cyan-700">
+                                      <span className="text-xs font-medium text-emerald-700">
                                         {isExpanded ? 'Click to collapse' : 'Click to view appointments'}
                                       </span>
                                     </div>
@@ -1998,9 +2272,9 @@ function App() {
                                       {appt.patient_name || 'Unknown'}
                                     </td>
                                     <td className="px-6 py-4 whitespace-nowrap text-xs text-slate-600">{appt.regno}</td>
-                                    <td className="px-6 py-4 whitespace-nowrap text-xs text-slate-600 font-medium">{appt.date}</td>
-                                    <td className="px-6 py-4 whitespace-nowrap text-xs font-bold text-cyan-700">
-                                      {appt.time}
+                                    <td className="px-6 py-4 whitespace-nowrap text-xs text-slate-600 font-medium">{formatAppointmentDateWithDay(appt.date)}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-xs font-bold text-emerald-700">
+                                      {formatAppointmentTime12h(appt.time)}
                                     </td>
                                     <td className="px-6 py-4 whitespace-nowrap text-sm text-right">
                                       <div className="flex justify-end space-x-1">

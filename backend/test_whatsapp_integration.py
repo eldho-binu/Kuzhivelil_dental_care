@@ -767,6 +767,36 @@ class WhatsAppIntegrationTestCase(unittest.TestCase):
         self.assertEqual(mock_post.call_count, 2)
         self.assertEqual(mock_post.call_args.kwargs["json"]["to"], "919847584950")
 
+    def test_dashboard_stats_returns_7_day_activity_and_next_appointments(self):
+        self.fake_db["patients"].insert_one(
+            {
+                "regno": "KDC-STAT",
+                "name": "Stats Patient",
+                "phone": "9876543210",
+                "age": 28,
+                "created_at": datetime.now(),
+            }
+        )
+        self.fake_db["appointments"].insert_one(
+            {
+                "regno": "KDC-STAT",
+                "date": "2099-12-30",
+                "time": "11:30",
+                "datetime": datetime(2099, 12, 30, 11, 30),
+                "doctor_name": "Dr. Kuzhivelil",
+                "created_at": datetime.now(),
+            }
+        )
+
+        res = self.client.get("/api/dashboard/stats", headers=self.auth_headers)
+        self.assertEqual(res.status_code, 200)
+        data = res.get_json()
+        self.assertTrue(data["success"])
+        self.assertEqual(len(data["last_7_days"]), 7)
+        self.assertEqual(data["upcoming_appointments_count"], 1)
+        self.assertEqual(len(data["next_appointments"]), 1)
+        self.assertEqual(data["next_appointments"][0]["patient_name"], "Stats Patient")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
